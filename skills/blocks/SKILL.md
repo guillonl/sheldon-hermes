@@ -39,8 +39,8 @@ Le pic de samedi vient de ta story Instagram.
   but with `blocks` is a card.
 - JSON may be a little loose (trailing comma, comment, unquoted key). A number may be written `1284`,
   `"1 284"` or `"12,5"`.
-- A number inside text (a `center`, a chip, a title): in French, thousands are separated by a narrow
-  no-break space, U+202F (`1 284 écoutes`), never a plain space; in English, by a comma
+- A number inside text (a `center`, a chip, a title): in French, thousands are separated by a
+  no-break space, U+00A0 (`1 284 écoutes`), never a plain space nor the narrow U+202F; in English, by a comma
   (`1,284 listens`).
 - Dates: `2026-09-26`, `2026-09-26T20:00` (device time), `2026-09-26T20:00:00Z`,
   `2026-09-26T20:00+02:00`. Times alone: `09:30`, `9h30`, `14h`.
@@ -112,7 +112,7 @@ three at most), `unit`.
 ones become "Autres"), `center` (text in the middle), `unit`.
 
 ```sheldon
-{"type": "donut", "subtitle": "D’où viennent les écoutes", "center": "1 284", "parts": [{"label": "Spotify", "value": 610}, {"label": "Apple Podcasts", "value": 380}, {"label": "YouTube", "value": 210}, {"label": "Autres applis", "value": 84}]}
+{"type": "donut", "subtitle": "D’où viennent les écoutes", "center": "1 284", "parts": [{"label": "Spotify", "value": 610}, {"label": "Apple Podcasts", "value": 380}, {"label": "YouTube", "value": 210}, {"label": "Autres applis", "value": 84}]}
 ```
 
 **`meter`** (`gauge`): a gauge (disk, battery, quota). **`value`** (or `percent`), `max` (100 by
