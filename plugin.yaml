@@ -1,0 +1,9 @@
+name: sheldon
+label: Sheldon
+kind: platform
+version: 0.2.0
+description: >
+  Sheldon, the native iPhone and Mac app for Hermes. Pairs devices with a
+  one-time QR code shown in the terminal, then serves a small local API on
+  127.0.0.1 that Tailscale Serve exposes over HTTPS. No relay, no third party.
+author: Léo Guillon
