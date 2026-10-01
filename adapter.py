@@ -12,7 +12,6 @@ import contextlib
 import dataclasses
 import logging
 import re
-import socket
 import threading
 import time
 from datetime import datetime
@@ -23,7 +22,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
-from .core import media, pair_link, paths, tailscale, welcome
+from .core import hostname, media, pair_link, paths, tailscale, welcome
 from .core.api import create_app
 from .core.bridge import DEFAULT_CURSOR, configured_cursor
 from .core.commands import command_parts, command_text, permitted
@@ -855,7 +854,7 @@ class SheldonAdapter(BasePlatformAdapter):
             hermes_version = metadata.version("hermes-agent")
         except metadata.PackageNotFoundError:
             hermes_version = "unknown"
-        return {"hermesVersion": hermes_version, "serverName": socket.gethostname().split(".")[0]}
+        return {"hermesVersion": hermes_version, "serverName": hostname.display_name()}
 
     def _close_runtime(self) -> None:
         if self._runtime is not None:
