@@ -25,15 +25,26 @@ MAX_LABEL_LENGTH = 30
 MAX_REMEMBERED = 64
 _MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
 _CALL_ID = re.compile(r"c-[0-9a-f]{32}")
+# La langue de la voix de l'app (Réglages › Voix) : une étiquette BCP 47 courte, « fr », « en-CA ».
+_LANGUAGE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?")
+_LANGUAGE_NAMES = {"fr": "French", "en": "English"}
 _SURFACE_LINES = {
     "voiceMode": "Spoken aloud in Sheldon's voice mode: your reply is read aloud as you write it.",
     "call": "Spoken aloud during a phone call with you: your reply is read aloud as you write it.",
 }
 # Les règles de PLATFORM_HINT pour un tour dit, en court : une session déjà ouverte garde le prompt
 # système rangé avec elle (agent/conversation_loop.py), sans les règles d'une version plus récente.
+# Mots de Léo (2026-10-02) : une conversation vivante, comme un vrai assistant au téléphone, qui dit
+# "OK, je m'en occupe" avant un travail long et relance naturellement ("Autre chose ?").
 _SPOKEN_RULES = (
-    "Reply in two or three short sentences, the answer first, without Markdown; before a tool, say in one "
-    "short sentence what you are checking; put details in one sheldon block after your sentences."
+    "Reply in two or three short sentences, the answer first, without Markdown. Before a tool or anything "
+    "that takes a moment, say so right away in one short natural sentence (such as \"OK, I'm on it\" or "
+    "\"Let me check that\"), then do it and give the result after, in one or two sentences. For a decision "
+    "you need from the user, not a terminal command, ask with clarify or sheldon_propose in a short spoken "
+    "question a plain \"yes\" can answer; a command waiting on its approval card is never approved that way, "
+    "so just say in one short sentence that you need it there. When it fits naturally, end with a short, "
+    "varied follow-up such as \"Anything else?\"; never after every sentence, and never after a goodbye. "
+    "Put details in one sheldon block after your sentences."
 )
 
 
@@ -73,6 +84,7 @@ class TurnContext:
     label: Optional[str] = None
     call_id: Optional[str] = None
     device_locked: bool = False
+    language: Optional[str] = None
 
 
 def parse_context(value: Any) -> Optional[TurnContext]:
@@ -92,6 +104,9 @@ def parse_context(value: Any) -> Optional[TurnContext]:
     device_locked = value.get("deviceLocked")
     if device_locked is not None and not isinstance(device_locked, bool):
         raise ContextError("deviceLocked")
+    language = value.get("language")
+    if language is not None and (not isinstance(language, str) or not _LANGUAGE.fullmatch(language)):
+        raise ContextError("language")
     interrupted = _object(value, "interrupted")
     message_id = spoken = None
     if interrupted is not None:
@@ -106,7 +121,9 @@ def parse_context(value: Any) -> Optional[TurnContext]:
         if label is None:
             raise ContextError("answering.label")
         question = _text(answering.get("question"), MAX_QUESTION_LENGTH)
-    context = TurnContext(surface, interrupted is not None, message_id, spoken, question, label, call_id, device_locked is True)
+    context = TurnContext(
+        surface, interrupted is not None, message_id, spoken, question, label, call_id, device_locked is True, language,
+    )
     return None if context == TurnContext() else context
 
 
@@ -135,8 +152,21 @@ def render_context(context: TurnContext, placed_call: Optional[str] = None) -> O
         )
     if placed_call is not None:
         parts.append(
-            f'You placed this call (reason you gave: "{_quoted(placed_call)}"); the user just picked up.'
-            if placed_call else "You placed this call; the user just picked up."
+            (
+                f'You placed this call (reason you gave: "{_quoted(placed_call)}"); the user just picked up. '
+                "Open with that reason in one short sentence, then wait for their answer."
+            ) if placed_call else (
+                "You placed this call; the user just picked up. Open with why you called in one short "
+                "sentence, then wait for their answer."
+            )
+        )
+    if context.language is not None:
+        # La langue de la voix choisie dans l'app : Sheldon écoute et lit dans cette langue (mots de
+        # Léo, 2026-10-02 : « quand je choisis français, que ça change en français »).
+        name = _LANGUAGE_NAMES.get(context.language.split("-")[0])
+        parts.append(
+            f"Reply in {name}: Sheldon listens to the user and reads your reply aloud in {name}." if name
+            else f'Reply in the language "{context.language}": Sheldon listens to the user and reads your reply aloud in it.'
         )
     if context.surface is not None:
         parts.append(_SPOKEN_RULES)

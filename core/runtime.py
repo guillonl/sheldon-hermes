@@ -40,7 +40,7 @@ from .timeutil import iso_utc
 from .hub import EventHub
 from .outbox import Outbox, OutboxRelay
 from .push import PushService, load_config
-from .requests import Request, RequestError, RequestService, RequestStore, Resolvers, validate_proposal
+from .requests import MAX_IMPORTANT_PER_HOUR, Request, RequestError, RequestService, RequestStore, Resolvers, validate_proposal
 from .store import DeviceStore
 from .text import clean_line
 from .turn_context import TURN_CONTEXTS, AppMessage, TurnContext, render_context
@@ -89,6 +89,15 @@ PROPOSE_SCHEMA: Dict[str, Any] = {
             "conversation": {"type": "string", "description": "Sheldon conversation id; defaults to the current one or main."},
             "expires_in_minutes": {"type": "integer", "minimum": 1, "maximum": 10080},
             "allow_text": {"type": "boolean", "description": "Let the user answer with free text too."},
+            "important": {
+                "type": "boolean",
+                "description": (
+                    "True only when the primary choice sends something in the user's name, publishes, pays, "
+                    "buys, subscribes or cancels, involves other people, or deletes for good. Shown large on "
+                    "the iPhone lock screen with two buttons. At most 3 per hour; beyond, the request is made "
+                    "as a normal one."
+                ),
+            },
         },
         "required": ["title", "choices"],
     },
@@ -304,7 +313,10 @@ class Runtime:
         self.feed = FeedStore(db, clock=clock)
         self.outbox = Outbox(db, clock=clock)
         self.calls = CallStore(db, clock=clock)
-        self.events = Events(self.hub, push, self.catalog, pending=lambda: self.requests.pending(), resolve=self.conversation)
+        self.events = Events(
+            self.hub, push, self.catalog, pending=lambda: self.requests.pending(), resolve=self.conversation,
+            important_pending=lambda: self.requests.store.important_pending(),
+        )
         self.bridge = SheldonBridge(
             self.hub, submit, clock=clock, cursor=cursor, on_reply=self.events.reply, on_message=self._remember_message,
         )
@@ -719,7 +731,8 @@ def propose(args: Any, context: ToolContext, db_path: Path, port: HermesPort, cl
             return json.dumps({
                 "ok": False,
                 "error": "invalid arguments: title (one line, max 200), 1 to 3 choices with distinct labels (max 30), "
-                "optional body (max 4000), category (max 40), expires_in_minutes (1 to 10080), allow_text (boolean)",
+                "optional body (max 4000), category (max 40), expires_in_minutes (1 to 10080), allow_text (boolean), "
+                "important (boolean)",
             })
         agent = catalog.agent(context.profile or conversation.agent_id)
         if target is None and conversation.agent_id != agent.id:
@@ -738,6 +751,16 @@ def propose(args: Any, context: ToolContext, db_path: Path, port: HermesPort, cl
                 "error": f"Not proposed: you already made {MAX_PROPOSALS_PER_HOUR} proposals within the last hour. "
                 "Ask in your normal reply instead.",
             })
+        note = "The user will answer in the Sheldon app; the answer arrives later as a new message in this conversation."
+        # D10 (spec de l'Activité en direct des décisions importantes) : au-delà du plafond
+        # horaire, toutes conversations confondues, la demande part comme une proposition
+        # ordinaire plutôt que d'être refusée ; l'agent en est informé dans sa note.
+        if values.get("important") and store.important_since(clock() - 3600) >= MAX_IMPORTANT_PER_HOUR:
+            values["important"] = False
+            note = (
+                f"Not shown as important: {MAX_IMPORTANT_PER_HOUR} important decisions already made within the "
+                f"last hour. {note}"
+            )
         timeout = values.pop("timeout")
         request = store.insert(
             kind="question", origin="proposal", conversation_id=conversation.id, agent_id=agent.id,
@@ -745,8 +768,7 @@ def propose(args: Any, context: ToolContext, db_path: Path, port: HermesPort, cl
         )
         outbox.append("request.created", {"requestId": request.id})
         return json.dumps({
-            "ok": True, "requestId": request.id, "status": "pending",
-            "note": "The user will answer in the Sheldon app; the answer arrives later as a new message in this conversation.",
+            "ok": True, "requestId": request.id, "status": "pending", "important": request.important, "note": note,
         })
     finally:
         for closable in (catalog, feed, store, outbox):

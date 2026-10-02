@@ -20,6 +20,11 @@ AGENTS_SKILL_DESCRIPTION = (
     "Specialized agents and topic chats for the Sheldon app: load before creating a Hermes profile "
     "or a Sheldon chat."
 )
+LOGIC_SKILL_PATH = Path(__file__).resolve().parent / "skills" / "logic" / "SKILL.md"
+LOGIC_SKILL_DESCRIPTION = (
+    "When to show, ask, notify, call or stay quiet in the Sheldon app: load before deciding whether "
+    "to disturb the user."
+)
 PLATFORM_HINT = (
     "You are talking to the user through Sheldon, their native iPhone and Mac app. "
     "Replies render as GitHub-flavored Markdown (headings, lists, links, code blocks). "
@@ -46,6 +51,9 @@ PLATFORM_HINT = (
     "normal message. To ask something you must know before going on, use clarify with short button labels "
     "such as \"Add\" and \"Not now\". To leave a decision in the user's Requests tab, where it can wait and "
     "sends a notification, use the sheldon_propose tool. "
+    "Before deciding whether to show something in your reply, ask with a block or clarify, leave it "
+    "as a sheldon_propose, call with sheldon_call, or say nothing, load the `sheldon:logic` skill: it "
+    "says which surface fits and how not to overwhelm the user. "
     "When the user asks for a new specialized agent (a \"bot\") or a separate chat, load the "
     "`sheldon:agents` skill first."
 )
@@ -288,6 +296,7 @@ def register(ctx: Any) -> None:
     )
     ctx.register_skill("blocks", SKILL_PATH, description=SKILL_DESCRIPTION)
     ctx.register_skill("agents", AGENTS_SKILL_PATH, description=AGENTS_SKILL_DESCRIPTION)
+    ctx.register_skill("logic", LOGIC_SKILL_PATH, description=LOGIC_SKILL_DESCRIPTION)
     ctx.register_tool(
         name=PROPOSE_TOOL,
         toolset=PLATFORM_NAME,

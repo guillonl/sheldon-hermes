@@ -23,14 +23,17 @@ class Events:
         catalog: ConversationCatalog,
         pending: Callable[[], List[Request]] = lambda: [],
         resolve: Optional[Callable[[str], Optional[Conversation]]] = None,
+        important_pending: Callable[[], List[Request]] = lambda: [],
     ) -> None:
         # pending : les demandes en attente (le badge) ; resolve : trouve aussi les
-        # conversations de cartes du fil, que le catalogue ne connaît pas.
+        # conversations de cartes du fil, que le catalogue ne connaît pas ; important_pending :
+        # les décisions importantes encore en attente (activité en direct, E4).
         self._hub = hub
         self._push = push
         self._catalog = catalog
         self._pending = pending
         self._resolve = resolve or catalog.get
+        self._important_pending = important_pending
 
     @property
     def push(self) -> PushService:
@@ -50,6 +53,18 @@ class Events:
         self._safe_push(lambda: self._push.request_changed(
             request, self.sender(request.conversation_id), created,
             sum(1 for r in self._pending() if r.status in ("pending", "answering")),
+        ))
+        # E4 : l'Activité en direct des décisions importantes (live_changed ignore tout seul
+        # ce qui n'est pas important, D1). `sender` est un résolveur : une bascule vers une
+        # autre décision importante en attente peut appartenir à une tout autre conversation.
+        self._safe_push(lambda: self._push.live_changed(
+            request, created, self._important_pending(), lambda r: self.sender(r.conversation_id),
+        ))
+
+    def live_registered(self, device_id: str) -> None:
+        """Après un PUT /v1/devices/current/live-activity (core/api._set_live_activity)."""
+        self._safe_push(lambda: self._push.live_registered(
+            device_id, self._important_pending(), lambda r: self.sender(r.conversation_id),
         ))
 
     def reply(self, conversation_id: str, text: str, file_name: Optional[str] = None) -> None:

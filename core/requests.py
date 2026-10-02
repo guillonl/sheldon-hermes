@@ -19,10 +19,11 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .errors import SheldonError
-from .sqlite import SqliteStore
+from .sqlite import SqliteStore, ensure_columns
 from .text import clean_free_text, clean_line, is_forbidden
 from .timeutil import iso_utc
 
@@ -41,6 +42,9 @@ MAX_CHOICE_LENGTH = 30
 MAX_PROPOSAL_CHOICES = 3
 MAX_ANSWER_LENGTH = 2000
 MAX_PROPOSAL_MINUTES = 7 * 24 * 60
+# D10 (spec de l'Activité en direct des décisions importantes) : au-delà, une proposition
+# marquée importante part comme une proposition ordinaire, toutes conversations confondues.
+MAX_IMPORTANT_PER_HOUR = 3
 # Borne haute de tout délai (agent.clarify_timeout, approvals.timeout, sheldon_propose) :
 # une valeur énorme ou infinie ne doit jamais dépasser cette limite ni faire planter to_json().
 MAX_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
@@ -92,6 +96,10 @@ class Request:
     # moment de répondre pour la retrouver dans la file d'Hermes.
     command: Optional[str] = None
     expired_reason: Optional[str] = None
+    # Spec de l'Activité en direct des décisions importantes, D1 : vrai seulement pour une
+    # proposition (origin="proposal") que l'agent a marquée ; jamais pour un clarify ni une
+    # approbation, même marqués par erreur (RequestStore.insert l'impose).
+    important: bool = False
 
     @property
     def blocking(self) -> bool:
@@ -117,6 +125,7 @@ class Request:
             # exige answeredAt dans answer, constat Important 2 de la relecture du lot 12-13).
             "answer": dict(self.answer) if self.answer else None,
             "expiredReason": self.expired_reason if self.status == "expired" else None,
+            "important": self.important,
             "createdAt": iso_utc(self.created_at),
             "expiresAt": iso_utc(self.expires_at) if self.expires_at is not None else None,
         }
@@ -125,7 +134,7 @@ class Request:
 _COLUMNS = (
     "seq, id, kind, origin, conversation_id, agent_id, title, body, category, choices, allows_text, "
     "status, answer, hermes_ref, session_key, chat_id, created_at, expires_at, closed_at, claimed_at, "
-    "command, expired_reason"
+    "command, expired_reason, important"
 )
 
 
@@ -139,7 +148,7 @@ def _request(row: Optional[sqlite3.Row]) -> Optional[Request]:
         answer=json.loads(row["answer"]) if row["answer"] else None, hermes_ref=row["hermes_ref"],
         session_key=row["session_key"], chat_id=row["chat_id"], created_at=row["created_at"],
         expires_at=row["expires_at"], closed_at=row["closed_at"], claimed_at=row["claimed_at"], seq=row["seq"],
-        command=row["command"], expired_reason=row["expired_reason"],
+        command=row["command"], expired_reason=row["expired_reason"], important=bool(row["important"]),
     )
 
 
@@ -194,10 +203,17 @@ CREATE TABLE IF NOT EXISTS requests (
     closed_at REAL,
     claimed_at REAL,
     command TEXT,
-    expired_reason TEXT
+    expired_reason TEXT,
+    important INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
 """
+
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time) -> None:
+        super().__init__(path, clock)
+        # Une base de l'étape précédente a déjà sa table requests, sans cette colonne : le
+        # CREATE TABLE IF NOT EXISTS de SCHEMA ne la touche pas (E1, activité en direct).
+        ensure_columns(self._conn, "requests", {"important": "INTEGER NOT NULL DEFAULT 0"})
 
     def insert(self, **values: Any) -> Request:
         request_id = f"r-{uuid.uuid4().hex}"
@@ -211,17 +227,21 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
             expires_at = now + bounded_timeout
         else:
             expires_at = None
+        # D1 (défense en profondeur) : seule une proposition peut être importante, même si
+        # le champ est passé par erreur à un clarify ou une approbation.
+        important = bool(values.get("important", False)) and values["origin"] == "proposal"
         with self._lock:
             self._conn.execute(
                 "INSERT INTO requests (id, kind, origin, conversation_id, agent_id, title, body, category, "
-                "choices, allows_text, status, hermes_ref, session_key, chat_id, created_at, expires_at, command) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)",
+                "choices, allows_text, status, hermes_ref, session_key, chat_id, created_at, expires_at, command, "
+                "important) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request_id, values["kind"], values["origin"], values["conversation_id"], values["agent_id"],
                     values["title"], values.get("body"), values.get("category"),
                     json.dumps(values["choices"], ensure_ascii=False), int(values.get("allows_text", False)),
                     values.get("hermes_ref"), values.get("session_key"), values.get("chat_id"), now, expires_at,
-                    values.get("command"),
+                    values.get("command"), int(important),
                 ),
             )
         request = self.get(request_id)
@@ -294,6 +314,25 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
             ).fetchone()
         return int(row[0])
 
+    def important_since(self, since: float) -> int:
+        """Les décisions importantes créées depuis `since`, toutes conversations confondues
+        (D10 : le plafond horaire se vérifie sur ce total, pas par conversation)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM requests WHERE important = 1 AND created_at > ?", (since,)
+            ).fetchone()
+        return int(row[0])
+
+    def important_pending(self) -> List[Request]:
+        """Les décisions importantes en attente ou en cours de réponse, la plus récente d'abord
+        (spec de l'Activité en direct : une seule Activité à la fois, celle-ci)."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_COLUMNS} FROM requests WHERE important = 1 AND status IN ('pending', 'answering') "
+                "ORDER BY seq DESC"
+            ).fetchall()
+        return [_request(row) for row in rows]
+
     def decided(self, limit: int) -> List[Request]:
         with self._lock:
             rows = self._conn.execute(
@@ -333,7 +372,10 @@ def validate_proposal(args: Dict[str, Any]) -> Dict[str, Any]:
     choices = args.get("choices")
     minutes = args.get("expires_in_minutes")
     allow_text = args.get("allow_text", False)
+    important = args.get("important", False)
     if title is None or not isinstance(choices, list) or not 1 <= len(choices) <= MAX_PROPOSAL_CHOICES:
+        raise RequestError("invalid_request")
+    if not isinstance(important, bool):
         raise RequestError("invalid_request")
     if body is not None and (not isinstance(body, str) or len(body) > MAX_BODY_LENGTH):
         raise RequestError("invalid_request")
@@ -365,6 +407,7 @@ def validate_proposal(args: Dict[str, Any]) -> Dict[str, Any]:
         "category": category,
         "choices": clean_choices,
         "allows_text": allow_text,
+        "important": important,
         "timeout": minutes * 60 if minutes is not None else None,
     }
 

@@ -43,15 +43,18 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
+if TYPE_CHECKING:  # Import différé à l'exécution (core.live importe ce module) : voir live_changed.
+    from .live import LiveSend, SenderOf, ShownChange
+
 from .media import plain_preview
 from .paths import ensure_private_dir
 from .requests import Request
-from .store import DeviceStore, PushTarget
+from .store import DeviceStore, LiveTarget, PushTarget
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,12 @@ MIN_FIELD_LENGTH = 8
 # pose son bouton « Autoriser » direct que devant une commande tenant sur une seule ligne.
 MAX_COMMAND_LENGTH = 200
 _BEARER_IN_LOG = re.compile(r"(?i)bearer\s+\S+")
+# E3 (activité en direct des décisions importantes) : attributs-type et sujet propres aux
+# push liveactivity (F1, F2, « Forme des push » de la spec du 2 octobre 2026).
+LIVE_ATTRIBUTES_TYPE = "DecisionActivityAttributes"
+# Sujet des autres push, par type (F1 : voip ; spec de l'Activité en direct : liveactivity).
+# Vide par défaut (alert, background).
+_TOPIC_SUFFIXES = {"voip": ".voip", "liveactivity": ".push-type.liveactivity"}
 
 Runner = Callable[[List[str], bytes], Awaitable[Tuple[int, bytes, bytes]]]
 
@@ -291,9 +300,15 @@ class Push:
     # en-tête, Apple stocke et réessaie tant que l'appareil est hors ligne). 0 est réservé
     # à un appel VoIP (tâche 17) : un appel ne doit jamais sonner en retard.
     expiration: Optional[int] = None
+    # E3 : un push liveactivity part d'ordinaire en priorité 10, sauf la mise à jour du
+    # compte « others » d'une décision qui n'est pas montrée (priorité 5, « Quand l'extension
+    # pousse » de la spec). None : la règle par défaut de push_type s'applique.
+    priority_override: Optional[int] = None
 
     @property
     def priority(self) -> int:
+        if self.priority_override is not None:
+            return self.priority_override
         return 5 if self.push_type == "background" else 10
 
 
@@ -442,6 +457,25 @@ def _bounded(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
+def _bounded_live(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Bornage propre à une charge liveactivity (F4, F11) : pas de libellés de boutons ni de
+    commande ici, seulement le titre du content-state (qui cède en premier, jusqu'à
+    MIN_FIELD_LENGTH) puis le corps de l'alerte, qui porte le même texte avec aperçu (jusqu'à
+    MIN_BODY_LENGTH)."""
+    if _payload_size(payload) <= MAX_PAYLOAD_BYTES:
+        return payload
+    payload = copy.deepcopy(payload)
+    state = payload.get("aps", {}).get("content-state")
+    if isinstance(state, dict):
+        _shrink_with_floor(state, "title", payload, MIN_FIELD_LENGTH)
+    if _payload_size(payload) <= MAX_PAYLOAD_BYTES:
+        return payload
+    alert = payload.get("aps", {}).get("alert")
+    if isinstance(alert, dict):
+        _shrink_with_floor(alert, "body", payload, MIN_BODY_LENGTH)
+    return payload
+
+
 class ApnsClient:
     def __init__(self, config: ApnsConfig, token: ApnsToken, run: Runner = run_command, curl: str = CURL) -> None:
         self._config = config
@@ -455,7 +489,7 @@ class ApnsClient:
         voip = push.push_type == "voip"
         headers = [
             f"authorization: bearer {self._token.bearer()}",
-            f"apns-topic: {self._config.topic}{'.voip' if voip else ''}",
+            f"apns-topic: {self._config.topic}{_TOPIC_SUFFIXES.get(push.push_type, '')}",
             f"apns-push-type: {push.push_type}",
             f"apns-priority: {push.priority}",
         ]
@@ -467,7 +501,8 @@ class ApnsClient:
             headers.append(f"apns-collapse-id: {push.collapse_id[:64]}")
         lines = [f"url = {_quote(APNS_HOSTS[push.environment] + '/3/device/' + push.token)}"]
         lines += [f"header = {_quote(header)}" for header in headers]
-        body = json.dumps(_bounded(_without_lone_surrogates(push.payload)), ensure_ascii=False, separators=(",", ":"))
+        bound = _bounded_live if push.push_type == "liveactivity" else _bounded
+        body = json.dumps(bound(_without_lone_surrogates(push.payload)), ensure_ascii=False, separators=(",", ":"))
         lines.append(f"data-binary = {_quote(body)}")
         return "\n".join(lines) + "\n"
 
@@ -655,6 +690,85 @@ def call_alert_payload(call: Dict[str, Any], preview: bool, *, push_key: bytes) 
     }
 
 
+# E3 (activité en direct des décisions importantes, spec du 2 octobre 2026) : le contenu
+# d'une Activité et ses trois push (start, update, end). Le fichier de référence partagé
+# avec les tests Swift est docs/extension/live-activity-content-state.json.
+
+
+def _primary_choice(request: Request) -> Optional[Dict[str, str]]:
+    """Le choix `primary` d'Hermes, sinon le premier (règle de HermesRequest.primaryChoice,
+    app). None seulement si la demande n'a aucun choix (jamais le cas d'une proposition)."""
+    if not request.choices:
+        return None
+    choice = next((c for c in request.choices if c.get("style") == "primary"), request.choices[0])
+    return {"id": choice["id"], "label": choice["label"]}
+
+
+def live_state(
+    request: Request, sender: str, others: int, preview: bool, status: Optional[str] = None
+) -> Dict[str, Any]:
+    """`DecisionActivityState` (content-state) : requestId, others, expiresAt et status
+    partent toujours ; sans aperçu (D6), sender, title, category et primary valent null,
+    rien de lisible ne passe par Apple. status : pending pour pending et answering (comme
+    Request.to_json()), sinon l'état réel de la demande, remplaçable par l'appelant (la fin
+    d'une Activité veut son status final même si la base dit encore autre chose)."""
+    final_status = status or ("pending" if request.status in ("pending", "answering") else request.status)
+    category = request.category if request.category and request.category.strip().casefold() != sender.strip().casefold() else None
+    primary = _primary_choice(request)
+    return {
+        "requestId": request.id,
+        "sender": sender if preview else None,
+        "title": request.title if preview else None,
+        "category": category if preview else None,
+        "primary": primary if preview else None,
+        "others": others,
+        "expiresAt": request.expires_at,
+        "status": final_status,
+    }
+
+
+def _live_alert(sender: str, title: str, preview: bool) -> Dict[str, Any]:
+    if preview:
+        return {"title": sender, "body": title}
+    # Sans aperçu, l'alerte reprend les clés déjà traduites par l'app pour une demande ordinaire.
+    return {"title": {"loc-key": "PUSH_REQUEST_TITLE"}, "body": {"loc-key": "PUSH_REQUEST_BODY"}}
+
+
+def live_start_payload(request: Request, sender: str, others: int, preview: bool, now: float) -> Dict[str, Any]:
+    """Un `start` (F2) : alert sans son (H1, D5), attributes-type et attributes obligatoires,
+    input-push-token pour recevoir le jeton de l'Activité au réveil (F2). isDemo toujours
+    faux : seule l'app programme une Activité de démo (D12)."""
+    payload: Dict[str, Any] = {
+        "aps": {
+            "timestamp": int(now),
+            "event": "start",
+            "content-state": live_state(request, sender, others, preview),
+            "attributes-type": LIVE_ATTRIBUTES_TYPE,
+            "attributes": {"startRequestId": request.id, "isDemo": False},
+            "input-push-token": 1,
+            "alert": _live_alert(sender, request.title, preview),
+        },
+    }
+    if request.expires_at is not None:
+        payload["aps"]["stale-date"] = request.expires_at
+    return payload
+
+
+def live_update_payload(state: Dict[str, Any], now: float, stale_date: Optional[float] = None) -> Dict[str, Any]:
+    """Un `update` (F2) : jamais d'alerte ni d'apns-expiration ; stale-date seulement si la
+    demande montrée a une échéance."""
+    payload: Dict[str, Any] = {"aps": {"timestamp": int(now), "event": "update", "content-state": state}}
+    if stale_date is not None:
+        payload["aps"]["stale-date"] = stale_date
+    return payload
+
+
+def live_end_payload(state: Dict[str, Any], now: float) -> Dict[str, Any]:
+    """Un `end` (F2) : `state` porte déjà le status final (answered/expired) ; dismissal-date
+    avant timestamp retire l'Activité aussitôt plutôt que dans les 4 h qui suivent."""
+    return {"aps": {"timestamp": int(now), "event": "end", "content-state": state, "dismissal-date": int(now) - 1}}
+
+
 class PushService:
     """Qui reçoit quoi. Sans client (APNs pas réglé), ne fait rien."""
 
@@ -664,6 +778,7 @@ class PushService:
         client: Optional[ApnsClient],
         preview: bool = True,
         spawn: Optional[Callable[[Awaitable[None]], Any]] = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         self._store = store
         self._client = client
@@ -671,21 +786,25 @@ class PushService:
         self._spawn = spawn or self._spawn_task
         self._tasks: Set["asyncio.Task[None]"] = set()
         self._closed = False
+        self._clock = clock
 
     @classmethod
-    def from_directory(cls, store: DeviceStore, directory: Path, run: Runner = run_command, curl: str = CURL) -> "PushService":
+    def from_directory(
+        cls, store: DeviceStore, directory: Path, run: Runner = run_command, curl: str = CURL,
+        clock: Callable[[], float] = time.time,
+    ) -> "PushService":
         config = load_config(directory)
         if config is None:
-            return cls(store, None)
+            return cls(store, None, clock=clock)
         if not _curl_supports_http2(curl):
             logger.warning("Sheldon: %s ne supporte pas HTTP/2 : notifications désactivées", curl)
-            return cls(store, None)
+            return cls(store, None, clock=clock)
         try:
             client = ApnsClient(config, ApnsToken(config), run=run, curl=curl)
         except (InsecureKeyError, OSError) as error:
             logger.warning("Sheldon: %s", error)
-            return cls(store, None)
-        return cls(store, client, preview=config.preview)
+            return cls(store, None, clock=clock)
+        return cls(store, client, preview=config.preview, clock=clock)
 
     @property
     def enabled(self) -> bool:
@@ -734,6 +853,56 @@ class PushService:
         pushes += [(target, Push(target.token, target.environment, alerting, "alert", call["callId"])) for target in alerts]
         if pushes:
             self._launch(self._deliver(pushes))
+
+    def live_changed(self, request: Request, created: bool, important: List[Request], sender: "SenderOf") -> None:
+        """Une demande vient de changer (créée ou close) : si elle est importante (D1),
+        pousse ce que la table « Quand l'extension pousse » décide pour chaque iPhone qui a
+        une ligne live_activities (core/live.plan_live). `important` : les décisions
+        importantes encore en attente après ce changement (RequestStore.important_pending()).
+        Import différé de core.live pour casser le cycle (live.py importe des fonctions de
+        ce module)."""
+        if self._client is None:
+            return
+        targets = self._store.live_targets()
+        if not targets:
+            return
+        from .live import plan_live
+
+        sends, shown_changes = plan_live(request, created, important, targets, sender, self._preview, self._clock())
+        self._apply_live(sends, shown_changes)
+
+    def live_registered(self, device_id: str, important: List[Request], sender: "SenderOf") -> None:
+        """Après un PUT /v1/devices/current/live-activity (core/api._set_live_activity) : si la
+        demande que cet appareil montre n'attend déjà plus, ferme ou bascule aussitôt."""
+        if self._client is None:
+            return
+        target: Optional[LiveTarget] = self._store.live_target(device_id)
+        if target is None:
+            return
+        from .live import plan_registered
+
+        sends, shown_changes = plan_registered(target, important, sender, self._preview, self._clock())
+        self._apply_live(sends, shown_changes)
+
+    def _apply_live(self, sends: "List[LiveSend]", shown_changes: "List[ShownChange]") -> None:
+        for change in shown_changes:
+            self._store.set_live_shown(change.device_id, change.request_id, change.forget_activity_token)
+        if sends:
+            self._launch(self._deliver_live(sends))
+
+    async def _deliver_live(self, sends: "List[LiveSend]") -> None:
+        assert self._client is not None
+        for send in sends:
+            push = Push(send.token, send.environment, send.payload, push_type="liveactivity", expiration=send.expiration, priority_override=send.priority)
+            try:
+                result = await self._client.send(push)
+            except Exception:
+                logger.exception("Sheldon: APNs push failed")
+                continue
+            if result.dead_token:
+                self._store.clear_live_token(send.device_id, send.token)
+            elif result.status != 200:
+                logger.warning("Sheldon: APNs refused a push (%s %s)", result.status, result.reason)
 
     def _send_all(self, make: Callable[[PushTarget], Push]) -> None:
         if self._client is None:

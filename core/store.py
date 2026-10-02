@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS push_key (
     key BLOB NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS live_activities (
+    device_id TEXT PRIMARY KEY,
+    environment TEXT NOT NULL,
+    start_token TEXT,
+    activity_token TEXT,
+    shown_request_id TEXT,
+    updated_at REAL NOT NULL
+);
 """
 
 _DEVICE_COLUMNS = "id, name, platform, created_at, last_seen_at"
@@ -89,6 +97,17 @@ class Device:
     platform: str
     created_at: float
     last_seen_at: Optional[float]
+
+
+@dataclass(frozen=True)
+class LiveTarget:
+    """Une Activité en direct des décisions importantes, par appareil iOS (spec du 2 octobre 2026)."""
+
+    device_id: str
+    environment: str
+    start_token: Optional[str]
+    activity_token: Optional[str]
+    shown_request_id: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -306,6 +325,7 @@ class DeviceStore:
         """
         with self._lock:
             self._conn.execute("DELETE FROM push_tokens WHERE device_id = ?", (device_id,))
+            self._conn.execute("DELETE FROM live_activities WHERE device_id = ?", (device_id,))
             removed = self._conn.execute("DELETE FROM devices WHERE id = ?", (device_id,)).rowcount == 1
             if removed:
                 self._conn.execute("DELETE FROM pairing_codes WHERE used_at IS NULL")
@@ -372,6 +392,85 @@ class DeviceStore:
             for r in rows
         ]
 
+    def set_live_activity(
+        self,
+        device_id: str,
+        environment: str,
+        start_token: Optional[str],
+        activity_token: Optional[str],
+        request_id: Optional[str],
+    ) -> None:
+        """`PUT /v1/devices/current/live-activity` : remplace tout, comme set_push_token.
+
+        Un `start_token` ou `activity_token` repris par un autre appareil (app réinstallée,
+        appareil relié à nouveau) quitte l'ancien, pour la même raison que set_push_token."""
+        with self._lock:
+            if start_token:
+                self._conn.execute(
+                    "UPDATE live_activities SET start_token = NULL WHERE start_token = ? AND device_id != ?",
+                    (start_token, device_id),
+                )
+            if activity_token:
+                self._conn.execute(
+                    "UPDATE live_activities SET activity_token = NULL WHERE activity_token = ? AND device_id != ?",
+                    (activity_token, device_id),
+                )
+            self._conn.execute(
+                "INSERT INTO live_activities (device_id, environment, start_token, activity_token, "
+                "shown_request_id, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(device_id) DO UPDATE SET environment = excluded.environment, "
+                "start_token = excluded.start_token, activity_token = excluded.activity_token, "
+                "shown_request_id = excluded.shown_request_id, updated_at = excluded.updated_at",
+                (device_id, environment, start_token, activity_token, request_id, self._clock()),
+            )
+
+    def clear_live_activity(self, device_id: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM live_activities WHERE device_id = ?", (device_id,))
+
+    def live_target(self, device_id: str) -> Optional[LiveTarget]:
+        return next((t for t in self.live_targets() if t.device_id == device_id), None)
+
+    def live_targets(self) -> List[LiveTarget]:
+        """Les appareils iOS reliés qui ont une ligne live_activities (jamais le Mac : F10)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT l.device_id, l.environment, l.start_token, l.activity_token, l.shown_request_id "
+                "FROM live_activities l JOIN devices d ON d.id = l.device_id WHERE d.platform = 'ios' "
+                "ORDER BY l.updated_at, l.device_id"
+            ).fetchall()
+        return [
+            LiveTarget(r["device_id"], r["environment"], r["start_token"], r["activity_token"], r["shown_request_id"])
+            for r in rows
+        ]
+
+    def set_live_shown(self, device_id: str, request_id: Optional[str], forget_activity_token: bool) -> None:
+        """La demande que l'Activité de cet appareil montre désormais ; forget_activity_token
+        efface aussi son jeton (une Activité qui vient de finir, D3/D4 de la spec)."""
+        with self._lock:
+            if forget_activity_token:
+                self._conn.execute(
+                    "UPDATE live_activities SET shown_request_id = ?, activity_token = NULL WHERE device_id = ?",
+                    (request_id, device_id),
+                )
+            else:
+                self._conn.execute(
+                    "UPDATE live_activities SET shown_request_id = ? WHERE device_id = ?", (request_id, device_id)
+                )
+
+    def clear_live_token(self, device_id: str, token: str) -> None:
+        """Oublie un jeton de démarrage ou d'Activité refusé par Apple, s'il n'a pas changé
+        entre-temps ; l'autre colonne n'est jamais touchée."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE live_activities SET start_token = NULL WHERE device_id = ? AND start_token = ?",
+                (device_id, token),
+            )
+            self._conn.execute(
+                "UPDATE live_activities SET activity_token = NULL WHERE device_id = ? AND activity_token = ?",
+                (device_id, token),
+            )
+
     def remember_client_message(self, client_message_id: str, device_id: str) -> bool:
         now = self._clock()
         with self._lock:
@@ -398,5 +497,5 @@ class DeviceStore:
 
     def reset_all(self) -> None:
         with self._lock:
-            for table in ("owner", "devices", "pairing_codes", "client_messages", "push_tokens"):
+            for table in ("owner", "devices", "pairing_codes", "client_messages", "push_tokens", "live_activities"):
                 self._conn.execute(f"DELETE FROM {table}")

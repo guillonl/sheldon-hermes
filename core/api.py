@@ -63,6 +63,9 @@ _ERROR_STATUS = {
     "hermes_unavailable": 503,
 }
 _FILE_ID = re.compile(r"[0-9a-f]{32}")
+# L'identifiant d'une demande (RequestStore.insert : f"r-{uuid.uuid4().hex}"), vérifié sur
+# `requestId` de PUT /v1/devices/current/live-activity (E2, activité en direct des décisions).
+_REQUEST_ID = re.compile(r"r-[0-9a-f]{32}")
 # Un type qu'un aperçu (WKWebView) exécuterait comme un document actif plutôt que de
 # l'afficher passivement : jamais servi sans bac à sable, même en inline.
 _SANDBOXED_MIME_TYPES = ("text/html", "image/svg+xml")
@@ -518,6 +521,46 @@ async def _clear_push_token(request: web.Request) -> web.Response:
     return web.Response(status=204)
 
 
+def _normalized_or_absent(raw: Any) -> Any:
+    """`None` ou `""` valent absent (pas de jeton) ; un jeton présent doit être de l'hexadécimal.
+    Rend l'objet NOT_HEX (un sentinel, jamais un jeton valable) pour un jeton mal formé, que
+    l'appelant distingue de l'absence."""
+    if raw in (None, ""):
+        return None
+    return normalize_device_token(raw)
+
+
+async def _set_live_activity(request: web.Request) -> web.Response:
+    """`PUT /v1/devices/current/live-activity` (E2, activité en direct des décisions importantes) :
+    un Mac n'a jamais d'Activité (F10) ; chaque appel remplace tout, comme pour le jeton APNs."""
+    ctx = request.app[CTX]
+    device: Device = request[DEVICE]
+    if device.platform == "macos":
+        raise ApiError(400, "invalid_request")
+    body = await _read_json(request)
+    environment = body.get("environment")
+    if environment not in ENVIRONMENTS:
+        raise ApiError(400, "invalid_request")
+    raw_start, raw_activity = body.get("startToken"), body.get("activityToken")
+    start_token = _normalized_or_absent(raw_start)
+    activity_token = _normalized_or_absent(raw_activity)
+    if (raw_start not in (None, "") and start_token is None) or (raw_activity not in (None, "") and activity_token is None):
+        raise ApiError(400, "invalid_request")
+    request_id = body.get("requestId")
+    if request_id is not None and (not isinstance(request_id, str) or not _REQUEST_ID.fullmatch(request_id)):
+        raise ApiError(400, "invalid_request")
+    ctx.store.set_live_activity(device.id, environment, start_token, activity_token, request_id)
+    # E4 : si la demande que cet appareil annonce montrer n'attend déjà plus, l'Activité
+    # bascule ou se termine aussitôt plutôt que d'attendre le prochain changement de demande.
+    ctx.services.events.live_registered(device.id)
+    return web.Response(status=204)
+
+
+async def _clear_live_activity(request: web.Request) -> web.Response:
+    request.app[CTX].store.clear_live_activity(request[DEVICE].id)
+    return web.Response(status=204)
+
+
 async def _list_requests(request: web.Request) -> web.Response:
     requests = request.app[CTX].services.requests
     limit = _int_param(request, "decidedLimit", DEFAULT_DECIDED, 1, MAX_DECIDED)
@@ -722,6 +765,8 @@ def create_app(
     app.router.add_get("/v1/devices", _list_devices)
     app.router.add_put("/v1/devices/current/push", _set_push_token)
     app.router.add_delete("/v1/devices/current/push", _clear_push_token)
+    app.router.add_put("/v1/devices/current/live-activity", _set_live_activity)
+    app.router.add_delete("/v1/devices/current/live-activity", _clear_live_activity)
     app.router.add_delete("/v1/devices/{device_id}", _revoke_device)
     app.router.add_get("/v1/events", _events)
     app.on_shutdown.append(_close_sockets)

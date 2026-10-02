@@ -11,7 +11,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .paths import ensure_private_dir
 
@@ -25,6 +25,18 @@ def open_database(path: Path, schema: str) -> sqlite3.Connection:
     conn.executescript(schema)
     os.chmod(path, 0o600)
     return conn
+
+
+def ensure_columns(conn: sqlite3.Connection, table: str, columns: Dict[str, str]) -> None:
+    """Ajoute à `table` les colonnes de `columns` (nom -> déclaration SQL) qui lui manquent
+    encore : une base ouverte avec un schéma plus ancien que celui du code (CREATE TABLE IF
+    NOT EXISTS ne touche jamais une table qui existe déjà) gagne ainsi ses colonnes neuves,
+    avec leur valeur par défaut pour les lignes déjà là. Idempotent : un second appel, sur une
+    base déjà à jour, ne fait rien."""
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, declaration in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
 
 class SqliteStore:
