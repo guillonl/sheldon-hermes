@@ -8,6 +8,7 @@ voir un chemin du Mac mini. En production, l'adaptateur passe la fonction d'Herm
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import List, Tuple
@@ -74,6 +75,45 @@ def _cap(text: str, limit: int) -> str:
 def plain_preview(text: str, limit: int = 180) -> str:
     """Le texte d'une notification : tout le message en une ligne, borné."""
     return _cap(" ".join(_plain_lines(text)), limit)
+
+
+_BLOCK_FENCES = ("sheldon", "sheldon-block")
+
+
+def block_summary(text: str) -> str:
+    """Le `summary` du premier bloc ```sheldon qui en a un (un objet, ou un tableau d'objets), en
+    texte simple : le corps d'une notification pour une réponse sans phrase (spec 7.2). "" sinon,
+    sans jamais lever : un JSON illisible ne coûte que le résumé."""
+    fence = None
+    body: List[str] = []
+    for raw in text.splitlines():
+        if not _FENCE.match(raw):
+            if fence is not None:
+                body.append(raw)
+            continue
+        if fence is None:
+            language = raw.strip().lstrip("`~").strip().split(" ")[0].lower()
+            fence = language
+            body = []
+            continue
+        if fence in _BLOCK_FENCES:
+            summary = _first_summary("\n".join(body))
+            if summary:
+                return summary
+        fence = None
+    return ""
+
+
+def _first_summary(body: str) -> str:
+    try:
+        value = json.loads(body)
+    except (ValueError, RecursionError):
+        return ""
+    for item in value if isinstance(value, list) else [value]:
+        summary = item.get("summary") if isinstance(item, dict) else None
+        if isinstance(summary, str) and plain_preview(summary):
+            return plain_preview(summary)
+    return ""
 
 
 def first_line(text: str, limit: int = 120) -> str:

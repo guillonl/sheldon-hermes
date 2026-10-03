@@ -1,4 +1,4 @@
-"""Les demandes : ce qu'Hermes attend de Léo, rangé dans sheldon.db et répondu depuis l'app.
+"""Les demandes : ce qu'Hermes attend de l'utilisateur, rangé dans sheldon.db et répondu depuis l'app.
 
 Trois origines, deux formes pour l'app :
 - « clarify » (question) : l'outil clarify d'Hermes pose une question, avec ou sans choix,
@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .errors import SheldonError
+from .source import clean_source
 from .sqlite import SqliteStore, ensure_columns
 from .text import clean_free_text, clean_line, is_forbidden
 from .timeutil import iso_utc
@@ -100,6 +101,9 @@ class Request:
     # proposition (origin="proposal") que l'agent a marquée ; jamais pour un clarify ni une
     # approbation, même marqués par erreur (RequestStore.insert l'impose).
     important: bool = False
+    # La provenance (le mail, le message, l'invitation d'où vient la demande), nettoyée par
+    # source.clean_source : l'app la montre en une ligne et ouvre le message d'origine entier.
+    source: Optional[Dict[str, Any]] = None
 
     @property
     def blocking(self) -> bool:
@@ -126,6 +130,7 @@ class Request:
             "answer": dict(self.answer) if self.answer else None,
             "expiredReason": self.expired_reason if self.status == "expired" else None,
             "important": self.important,
+            "source": dict(self.source) if self.source else None,
             "createdAt": iso_utc(self.created_at),
             "expiresAt": iso_utc(self.expires_at) if self.expires_at is not None else None,
         }
@@ -134,7 +139,7 @@ class Request:
 _COLUMNS = (
     "seq, id, kind, origin, conversation_id, agent_id, title, body, category, choices, allows_text, "
     "status, answer, hermes_ref, session_key, chat_id, created_at, expires_at, closed_at, claimed_at, "
-    "command, expired_reason, important"
+    "command, expired_reason, important, source"
 )
 
 
@@ -149,6 +154,7 @@ def _request(row: Optional[sqlite3.Row]) -> Optional[Request]:
         session_key=row["session_key"], chat_id=row["chat_id"], created_at=row["created_at"],
         expires_at=row["expires_at"], closed_at=row["closed_at"], claimed_at=row["claimed_at"], seq=row["seq"],
         command=row["command"], expired_reason=row["expired_reason"], important=bool(row["important"]),
+        source=json.loads(row["source"]) if row["source"] else None,
     )
 
 
@@ -204,7 +210,8 @@ CREATE TABLE IF NOT EXISTS requests (
     claimed_at REAL,
     command TEXT,
     expired_reason TEXT,
-    important INTEGER NOT NULL DEFAULT 0
+    important INTEGER NOT NULL DEFAULT 0,
+    source TEXT
 );
 CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
 """
@@ -213,7 +220,7 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
         super().__init__(path, clock)
         # Une base de l'étape précédente a déjà sa table requests, sans cette colonne : le
         # CREATE TABLE IF NOT EXISTS de SCHEMA ne la touche pas (E1, activité en direct).
-        ensure_columns(self._conn, "requests", {"important": "INTEGER NOT NULL DEFAULT 0"})
+        ensure_columns(self._conn, "requests", {"important": "INTEGER NOT NULL DEFAULT 0", "source": "TEXT"})
 
     def insert(self, **values: Any) -> Request:
         request_id = f"r-{uuid.uuid4().hex}"
@@ -234,14 +241,15 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
             self._conn.execute(
                 "INSERT INTO requests (id, kind, origin, conversation_id, agent_id, title, body, category, "
                 "choices, allows_text, status, hermes_ref, session_key, chat_id, created_at, expires_at, command, "
-                "important) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)",
+                "important, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request_id, values["kind"], values["origin"], values["conversation_id"], values["agent_id"],
                     values["title"], values.get("body"), values.get("category"),
                     json.dumps(values["choices"], ensure_ascii=False), int(values.get("allows_text", False)),
                     values.get("hermes_ref"), values.get("session_key"), values.get("chat_id"), now, expires_at,
                     values.get("command"), int(important),
+                    json.dumps(values["source"], ensure_ascii=False) if values.get("source") else None,
                 ),
             )
         request = self.get(request_id)
@@ -297,7 +305,7 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
         return [_request(row) for row in rows]
 
     def waiting_proposals(self, conversation_id: str) -> int:
-        """Les propositions de cette conversation (sheldon_propose) qui attendent encore Léo."""
+        """Les propositions de cette conversation (sheldon_propose) qui attendent encore l'utilisateur."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT COUNT(*) FROM requests WHERE origin = 'proposal' AND conversation_id = ? "
@@ -351,7 +359,7 @@ class Resolvers:
     clarify: Callable[[str, str], bool]
     # resolve_gateway_approval(session_key, choix, request_id=...) -> nombre de demandes débloquées
     approval: Callable[[str, str, Optional[str]], int]
-    # renvoie la réponse d'une proposition à Hermes, comme un message de Léo
+    # renvoie la réponse d'une proposition à Hermes, comme un message de l'utilisateur
     proposal: Callable[[Request, str], Awaitable[None]]
     # list_gateway_approvals(session_key) : la file d'Hermes pour la session, de la plus
     # ancienne à la plus récente, relue au moment de répondre ; None si elle est illisible.
@@ -408,6 +416,8 @@ def validate_proposal(args: Dict[str, Any]) -> Dict[str, Any]:
         "choices": clean_choices,
         "allows_text": allow_text,
         "important": important,
+        # Une provenance illisible est laissée de côté : elle ne refuse jamais la proposition.
+        "source": clean_source(args.get("source")),
         "timeout": minutes * 60 if minutes is not None else None,
     }
 
@@ -601,7 +611,7 @@ class RequestService:
         Une réponse ne part jamais sans request_id : sans lui, Hermes débloque sa plus ancienne
         approbation en attente pour la session (queue.pop(0), tools/approval.py:2664), pas
         forcément celle-ci. Démonstration de la relecture : la file illisible à la création, deux
-        cartes sans référence ; Léo refuse rm -rf a, puis autorise git push --force, et Hermes
+        cartes sans référence ; l'utilisateur refuse rm -rf a, puis autorise git push --force, et Hermes
         exécutait rm -rf a.
         - La carte a un hermes_ref : une entrée de la file doit le porter encore.
         - Sinon : la file doit compter exactement UNE entrée qu'aucune carte ne porte, et sa

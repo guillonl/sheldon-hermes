@@ -1,8 +1,8 @@
 """Le nom du Mac que l'app affiche (Réglages) : scutil sous macOS, sinon le nom d'hôte réseau.
 
 M2 (revue du branchement à Hermes) : `socket.gethostname()` seul rend une adresse MAC sur un
-Mac sans nom d'hôte réseau réglé. `scutil --get ComputerName` lit le nom que Léo voit dans
-Réglages Système > Général > Partage (ex. « MacBook Pro de Léo »), celui que Finder et
+Mac sans nom d'hôte réseau réglé. `scutil --get ComputerName` lit le nom que l'utilisateur voit dans
+Réglages Système > Général > Partage (ex. « MacBook Pro de Camille »), celui que Finder et
 AirDrop utilisent.
 """
 from __future__ import annotations

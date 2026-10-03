@@ -7,7 +7,7 @@ les tests un faux. Trois fonctions servent hors du gateway, dans n'importe quel 
 d'Hermes : propose() (l'outil sheldon_propose), place_call() (l'outil sheldon_call) et
 queue_delivery() (envoi sans gateway).
 Chaque carte du fil a sa conversation, « feed-<id> » (la page « Voir ») : elle commence par
-le texte livré, et chaque message que Léo y écrit part à Hermes avec ce texte en contexte.
+le texte livré, et chaque message que l'utilisateur y écrit part à Hermes avec ce texte en contexte.
 """
 from __future__ import annotations
 
@@ -38,12 +38,19 @@ from .history import (
 )
 from .timeutil import iso_utc
 from .hub import EventHub
+from .notices import NoticeStore
 from .outbox import Outbox, OutboxRelay
 from .push import PushService, load_config
-from .requests import MAX_IMPORTANT_PER_HOUR, Request, RequestError, RequestService, RequestStore, Resolvers, validate_proposal
+from .requests import (
+    EXPIRED_TIMEOUT, MAX_IMPORTANT_PER_HOUR, Request, RequestError, RequestService, RequestStore, Resolvers, validate_proposal,
+)
 from .store import DeviceStore
 from .text import clean_line
-from .turn_context import TURN_CONTEXTS, AppMessage, TurnContext, render_context
+from .turn_context import (
+    MAX_NOTES, TURN_CONTEXTS, AppMessage, TurnContext, catalog_line, expired_line, feedback_line, render_context,
+    undrawn_line,
+)
+from .version import BLOCK_CATALOG_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +62,7 @@ MAX_THREAD_CONTEXT = 4000
 # lot 12-13).
 CRON_FILE_ATTACH_WINDOW_SECONDS = 30.0
 # Chaque proposition est une notification avec son : un agent manipulé (un courriel lu par une
-# tâche planifiée) ou une tâche qui boucle ne doit pas en noyer Léo (revue de la branche, M1).
+# tâche planifiée) ou une tâche qui boucle ne doit pas en noyer l'utilisateur (revue de la branche, M1).
 MAX_WAITING_PROPOSALS = 10
 MAX_PROPOSALS_PER_HOUR = 20
 PROPOSE_TOOL = "sheldon_propose"
@@ -65,7 +72,7 @@ PROPOSE_SCHEMA: Dict[str, Any] = {
         "Ask the user to decide something in the Sheldon app, without waiting: the request "
         "appears in the Requests tab and as a notification with your buttons. Use it for "
         "proactive suggestions (add an event, send a draft, publish an episode). Do not use it "
-        "for a question you need answered now in this turn: use clarify instead. The user's "
+        "for a question you need answered now: ask it in this turn instead. The user's "
         "answer comes back later as a new message in the conversation. At most 10 proposals wait "
         "per conversation and 20 are made per hour: beyond that, the tool refuses."
     ),
@@ -97,6 +104,25 @@ PROPOSE_SCHEMA: Dict[str, Any] = {
                     "the iPhone lock screen with two buttons. At most 3 per hour; beyond, the request is made "
                     "as a normal one."
                 ),
+            },
+            "source": {
+                "type": "object",
+                "description": (
+                    "Where this request comes from, whenever it comes from a mail, a message, an invitation, a "
+                    "page or a file: the whole original message, never cut. Sheldon shows it in one line and opens "
+                    "it in full, with Reply. An unreadable source is dropped, never a reason to refuse."
+                ),
+                "properties": {
+                    "kind": {"type": "string", "description": "mail, message, invitation, web, file, or your own label."},
+                    "app": {"type": "string", "description": "For a message: Slack, WhatsApp, iMessage, Telegram…"},
+                    "from": {"description": "\"Name <address or handle>\", or {name, address}."},
+                    "to": {"description": "A person, or a list of them, as for from."},
+                    "subject": {"type": "string"},
+                    "date": {"type": "string", "description": "ISO 8601, as in blocks."},
+                    "body": {"type": "string", "description": "The whole text of the original message, at most 20000 characters."},
+                    "url": {"type": "string", "description": "The page, https only."},
+                    "attachments": {"type": "array", "description": "File names, or {name, kind, detail}."},
+                },
             },
         },
         "required": ["title", "choices"],
@@ -313,6 +339,7 @@ class Runtime:
         self.feed = FeedStore(db, clock=clock)
         self.outbox = Outbox(db, clock=clock)
         self.calls = CallStore(db, clock=clock)
+        self.notices = NoticeStore(db, clock=clock)
         self.events = Events(
             self.hub, push, self.catalog, pending=lambda: self.requests.pending(), resolve=self.conversation,
             important_pending=lambda: self.requests.store.important_pending(),
@@ -330,7 +357,7 @@ class Runtime:
                 redact=port.redact,
                 after_answer=lambda request: port.resume_typing(request.chat_id or ""),
             ),
-            self.events.request_changed,
+            self._request_changed,
             clock=clock,
         )
         self.deliveries = Deliveries(self.catalog, self.feed, self.files, port)
@@ -377,7 +404,7 @@ class Runtime:
         await self.events.push.aclose()
 
     def close(self) -> None:
-        for store in (self.catalog, self.files, self.feed, self.outbox, self.calls, self.requests.store):
+        for store in (self.catalog, self.files, self.feed, self.outbox, self.calls, self.notices, self.requests.store):
             with contextlib.suppress(Exception):
                 store.close()
 
@@ -501,25 +528,39 @@ class Runtime:
         call = self.calls.get(call_id)
         return call.agent_name if call is not None and call.conversation_id == conversation_id else None
 
+    def _request_changed(self, request: Request, created: bool) -> None:
+        """Chaque changement de demande part vers les appareils ; une proposition expirée à son
+        échéance devient aussi un constat pour Hermes, dit avec le prochain message de sa
+        conversation (spec 3.2). Un tour fini ou un gateway redémarré n'est pas un constat."""
+        self.events.request_changed(request, created)
+        if request.status == "expired" and request.origin == "proposal" and request.expired_reason == EXPIRED_TIMEOUT:
+            self.notices.add(request.conversation_id, expired_line(request.title))
+
     def _remember_message(
         self, message_id: str, conversation_id: str, text: str, context: Optional[TurnContext]
     ) -> None:
         """Le message, rangé pour le crochet pre_llm_call avec la ligne de son contexte s'il en a
         un. La raison d'un appel décroché est relue dans CallStore (l'appel rangé par sheldon_call
         pour cette conversation), jamais prise dans le message ; un appel inconnu, ou d'une autre
-        conversation, est ignoré."""
-        line = None
-        if context is not None:
-            placed_call = None
-            if context.call_id is not None:
-                call = self.calls.get(context.call_id)
-                if call is not None and call.conversation_id == conversation_id:
-                    placed_call = call.reason
-            line = render_context(context, placed_call)
+        conversation, est ignoré. Les constats (spec 3.2) rejoignent la ligne : les avis d'un toucher
+        sur un rapport, les blocs que l'app n'a pas pu dessiner, ceux gardés pour cette conversation dans la place qui reste (les
+        autres attendent le message suivant), un catalogue en retard, redit à chaque message."""
+        placed_call = None
+        if context is not None and context.call_id is not None:
+            call = self.calls.get(context.call_id)
+            if call is not None and call.conversation_id == conversation_id:
+                placed_call = call.reason
+        notes = [feedback_line(item) for item in (context.feedback if context is not None else ())]
+        notes += [undrawn_line(item) for item in (context.undrawn if context is not None else ())]
+        notes += self.notices.take(conversation_id, MAX_NOTES - len(notes))
+        oldest = self.store.oldest_catalog()
+        if oldest is not None and oldest < BLOCK_CATALOG_VERSION:
+            notes.append(catalog_line(oldest))
+        line = render_context(context, placed_call, notes) if context is not None or notes else None
         TURN_CONTEXTS.remember(AppMessage(message_id, conversation_id, text, line))
 
     async def _answer_proposal(self, request: Request, response: str) -> None:
-        # Sheldon écrit ce texte, pas Léo : il ne répond jamais à une question clarify en attente
+        # Sheldon écrit ce texte, pas l'utilisateur : il ne répond jamais à une question clarify en attente
         # dans la même conversation (revue finale du plan 6, I2).
         await self.bridge.submit_user_message(
             proposal_answer_text(request, response), f"proposal-{request.id[2:18]}", request.conversation_id,
@@ -560,7 +601,7 @@ class Runtime:
         ):
             # Le fichier d'un cron, envoyé à part et sans job_id : rejoint la carte que son
             # texte vient de livrer à cette même conversation, plutôt qu'un message à part. Un
-            # cron livre toujours hors d'un tour ; pendant un tour ouvert par un message de Léo,
+            # cron livre toujours hors d'un tour ; pendant un tour ouvert par un message de l'utilisateur,
             # le fichier est une réponse du chat, jamais un ajout à la carte (constat Important
             # 3, ronde 2 de la relecture du lot 12-13).
             item = recent[0]
@@ -667,9 +708,9 @@ class Runtime:
 
 
 # Liste blanche : les messageries d'Hermes 0.20.4 où un humain écrit lui-même (noms exacts de
-# gateway/config.py, Platform, et de plugins/platforms/*/plugin.yaml), plus les extensions de
-# Léo, « sheldon » et « fetch ». bluebubbles et photon sont les deux passerelles iMessage.
-# Toute autre surface ouvre des tours sans message de Léo : homeassistant (un capteur), a2a (un
+# gateway/config.py, Platform, et de plugins/platforms/*/plugin.yaml), plus les deux
+# extensions « sheldon » et « fetch ». bluebubbles et photon sont les deux passerelles iMessage.
+# Toute autre surface ouvre des tours sans message de l'utilisateur : homeassistant (un capteur), a2a (un
 # autre agent), ntfy (qui publie sur le sujet), webhook, api_server, relay, email (expéditeur
 # falsifiable), une plateforme inconnue ou future ; et le desktop, le TUI et le CLI, qui n'ont
 # pas de plateforme. Là, requested n'est pas cru et sheldon_pair refuse. Une messagerie ajoutée
@@ -694,7 +735,7 @@ class ToolContext:
     cron_session: str = ""
 
     def opened_by_a_message(self) -> bool:
-        """Vrai dans un tour de discussion ouvert par un message de Léo (ou relancé dans ce même
+        """Vrai dans un tour de discussion ouvert par un message de l'utilisateur (ou relancé dans ce même
         chat) sur une messagerie de CHAT_PLATFORMS ; faux partout ailleurs, et en tâche planifiée."""
         cron = self.cron_session.strip().lower() not in _NOT_CRON or bool(self.cron_platform)
         return not cron and self.platform in CHAT_PLATFORMS and bool(self.chat_id)
@@ -819,7 +860,7 @@ def place_call(
     vérifié ailleurs. Un agent manipulé qui le déclarerait toujours vrai contournerait sinon la
     limite horaire des appels non demandés et les heures calmes : les appels demandés sont donc
     bornés eux aussi (plan_call, requested_count), et requested n'est cru que dans un tour ouvert
-    par un message de Léo (ronde de sécurité, point 5). Chaque tentative évaluée par les
+    par un message de l'utilisateur (ronde de sécurité, point 5). Chaque tentative évaluée par les
     garde-fous (appel placé ou refusé, jamais un argument invalide ou un agent inconnu) est
     journalisée avec son identifiant, l'agent et le drapeau requested, jamais la raison.
     """

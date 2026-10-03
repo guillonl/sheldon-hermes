@@ -1,6 +1,6 @@
 """Le QR code d'une première installation demandée dans un chat, envoyé seul au redémarrage (E40).
 
-Léo colle à Hermes « Installe le plugin Sheldon…, puis envoie-moi le QR code de Sheldon ».
+L'utilisateur colle à Hermes « Installe le plugin Sheldon…, puis envoie-moi le QR code de Sheldon ».
 Hermes ne charge une extension qu'au redémarrage de son gateway (hermes_cli/plugins_cmd.py,
 « Restart the gateway for the plugin to take effect ») : pendant l'installation, l'outil
 sheldon_pair n'existe pas encore, et après /restart le modèle n'a pas de tour. D'où ce
@@ -8,7 +8,7 @@ mécanisme, une seule fois :
 1. pendant l'installation, Hermes lance « hermes sheldon pair --after-restart » dans son
    terminal : la commande note la plateforme et le chat de la session, que le terminal
    d'Hermes transmet (tools/environments/local.py, _inject_session_context_env) ;
-2. Léo envoie /restart dans ce chat : Hermes y écrit lui-même la plateforme et le chat de
+2. L'utilisateur envoie /restart dans ce chat : Hermes y écrit lui-même la plateforme et le chat de
    l'expéditeur, un utilisateur autorisé, dans .restart_notify.json
    (gateway/slash_commands.py) ;
 3. au démarrage, l'adaptateur lit la note (et l'efface, quoi qu'il arrive) et ce fichier,
@@ -19,7 +19,7 @@ mécanisme, une seule fois :
    présent, Funnel fermé, une seule offre, plafond horaire partagé) et envoie elle-même
    l'image et la phrase dans ce chat, par l'adaptateur de sa plateforme.
 Le modèle ne voit ni le code, ni même le chemin de l'image. Tout écart (autre chat, trop tard,
-fichier illisible, redémarrage par le terminal) n'envoie rien : Léo demande alors « QR code ».
+fichier illisible, redémarrage par le terminal) n'envoie rien : l'utilisateur demande alors « QR code ».
 """
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ def _take_note(path: Path) -> Optional[WelcomeNote]:
 
 
 def _restart_chat(hermes_home: Path) -> Optional[WelcomeTarget]:
-    """Le chat d'où Léo a envoyé /restart, tel qu'Hermes l'a écrit ; le fichier reste à Hermes."""
+    """Le chat d'où l'utilisateur a envoyé /restart, tel qu'Hermes l'a écrit ; le fichier reste à Hermes."""
     data = _read_json(Path(hermes_home) / RESTART_NOTICE)
     if not isinstance(data, dict):
         return None

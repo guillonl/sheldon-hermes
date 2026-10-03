@@ -1,6 +1,6 @@
 """Les notifications de Sheldon, envoyées directement à Apple (APNs), sans relais.
 
-La clé .p8 de Léo reste sur le Mac mini (~/.hermes/sheldon/apns/, droits 600). Le jeton
+La clé .p8 de l'utilisateur reste sur le Mac mini (~/.hermes/sheldon/apns/, droits 600). Le jeton
 JWT est signé en ES256 (PyJWT, déjà dans le venv d'Hermes) et renouvelé toutes les 50
 minutes (Apple le veut entre 20 et 60). Python n'a pas de client HTTP/2 dans ce venv :
 la requête part par « curl --http2 », qui lit ses options sur l'entrée standard pour
@@ -51,7 +51,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 if TYPE_CHECKING:  # Import différé à l'exécution (core.live importe ce module) : voir live_changed.
     from .live import LiveSend, SenderOf, ShownChange
 
-from .media import plain_preview
+from .media import block_summary, plain_preview
 from .paths import ensure_private_dir
 from .requests import Request
 from .store import DeviceStore, LiveTarget, PushTarget
@@ -108,7 +108,7 @@ class InsecureKeyError(Exception):
 
 
 class PushSetupError(ValueError):
-    """Un réglage refusé par save_config. `code` choisit la phrase montrée à Léo (messages.py,
+    """Un réglage refusé par save_config. `code` choisit la phrase montrée à l'utilisateur (messages.py,
     push_setup_<code>) : jamais le texte d'une exception, qui mélangerait l'anglais au français."""
 
     def __init__(self, code: str) -> None:
@@ -542,7 +542,7 @@ def _alert(title: str, body: str, preview: bool, kind: str) -> Dict[str, Any]:
 
 def _opaque(value: str, push_key: bytes) -> str:
     """Une empreinte courte, jamais un identifiant lisible : ce que l'app voit dans
-    thread-id ou conversationId quand Léo a coupé l'aperçu. HMAC-SHA256 salé par
+    thread-id ou conversationId quand l'utilisateur a coupé l'aperçu. HMAC-SHA256 salé par
     push_key (décision A54, remplace le SHA-256 sans sel) : stable pour une même clé,
     différente d'une clé à l'autre, pour que seule l'app qui détient sa copie de
     pushKey (reçue à l'appairage) puisse la retrouver en la recalculant."""
@@ -600,7 +600,9 @@ def reply_payload(
     conversation_id: str, sender: str, text: str, preview: bool, file_name: Optional[str] = None, *, push_key: bytes
 ) -> Dict[str, Any]:
     thread = conversation_id if preview else _opaque(conversation_id, push_key)
-    body = plain_preview(text)
+    # Une réponse sans phrase lit le `summary` de son bloc, seulement avec aperçu : sans aperçu,
+    # rien de lisible ne passe chez Apple (décision A54).
+    body = plain_preview(text) or (block_summary(text) if preview else "")
     if preview:
         alert: Dict[str, Any] = {"title": sender}
         if body:

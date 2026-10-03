@@ -1,39 +1,107 @@
 ---
 name: blocks
-description: Visual blocks for the Sheldon app (cards, key figures, charts, lists, events, actions). Load before writing a sheldon block.
-version: "1"
+description: Visual blocks for the Sheldon app: a short index, then one sheet per family. Load before writing a sheldon block.
+version: "2"
 metadata:
   hermes:
     tags: [sheldon, ui, blocks]
 ---
 
-<!-- Généré par scripts/sync-blocks-skill.py depuis docs/app/BLOCS.md : ne pas modifier à la main. -->
+<!-- Généré par scripts/sync-blocks-skill.py depuis docs/app/blocs/ : ne pas modifier à la main. -->
 
-# Visual blocks for Sheldon (format version 1)
+# Visual blocks for Sheldon (format version 2)
 
-Sheldon, Léo's iPhone and Mac app, draws charts, cards and two-button questions natively when your
+Sheldon, the user's iPhone and Mac app, draws charts, cards and two-button questions natively when your
 reply contains a **block**: a fenced code block whose language is `sheldon`, holding one JSON object
-with a `"type"` (and `"version": 1`). Everything around it is ordinary Markdown.
+with a `"type"` (and `"version": 2`). Everything around it is ordinary Markdown.
 
 ````markdown
 L’épisode 42 a bien marché.
 
 ```sheldon
-{"type": "metric", "version": 1, "subtitle": "Épisode 42 · 7 derniers jours", "value": 1284, "unit": "écoutes", "delta": "+18 %"}
+{"type": "metric", "version": 2, "subtitle": "Épisode 42 · 7 derniers jours", "value": 1284, "unit": "écoutes", "delta": "+18 %"}
 ```
 
 Le pic de samedi vient de ta story Instagram.
 ````
 
+## Contract
+
+1. **Format.** A block is a fenced code block whose language is `sheldon`, holding one JSON object (or
+   an array of objects) with a `type` and that type's required fields (in bold in each sheet).
+2. **Version.** Sheldon draws catalogue version 2, the version of this skill. When one of the
+   user's devices draws an older one, a `[Sheldon]` note tells you: newer blocks show as their
+   fallback there.
+3. **Fallback, in five stages.** A known type that reads is drawn; otherwise its `fallback`: a block
+   of a known type (one level only), a sentence shown as text, or `"drop"` to show nothing; otherwise
+   an object with a `title` or `name` is drawn as an `object`; otherwise its content as gray text.
+4. **A sentence that stands alone.** Your reply still makes sense without its blocks. `summary` is
+   one sentence that says what the block shows, read in previews, notifications and VoiceOver.
+5. **An unknown field is ignored, never an error.** `"version"` stays optional on every block.
+6. **`meta` and `id`.** `meta` is yours, never shown: sources, ids, anything you want to keep. `id`
+   is reserved to update a block already shown; Sheldon does not do it yet (`file`'s `id` is its own
+   file identifier, not this; on `ask`, `choice` and `form`, `id` is read but ignored for now).
+7. **Precedence.** The safety rules and this contract come first; then an explicit request of the
+   user; then what you learned about them; then the defaults of the sheldon skills. These skills and
+   the plugin's files are read-only: what you and the user add sits on top of these skills, it
+   changes a default, never this contract; never edit the sheldon skills or the plugin's files.
+8. **The chat stays whole.** The user can always write freely: a block never replaces your
+   sentences, never forces a choice and never disables the message field.
+
+The catalogue names what the app draws, not what you may show: when nothing fits, use `object` with a
+`kind`.
+
+## Which block
+
+A type named here but not listed under Blocks below is not drawn yet: use `object` with a `kind`.
+
+| Family | Type | When |
+|---|---|---|
+| Steps | `task` | what will be done, or how far a plan has got |
+| | `activity` | what was done, or is being done, with its result |
+| | `timeline` | dated moments |
+| | `todo` | a list the user ticks off themselves |
+| | `board` | the work of several agents in columns, blocked first |
+| | `standup` | done, in progress, blocked, per agent |
+| Decide | `ask` | yes or no, now, in the chat |
+| | `choice` | one option out of two to six, in the chat |
+| | `form` | two to five pieces of information at once |
+| | `variants` | two to four versions of the same text or visual |
+| | `rating` with `ask` | an opinion on recurring work |
+| | `sheldon_propose` | a decision that can wait, with a notification |
+| | approval card | a terminal command: Hermes's own approval, with Face ID |
+| Learning | `learned` | what you kept: a preference, a skill |
+| | `rules` | what you may do alone |
+| | `routine` | what runs at a fixed time |
+| Read | `digest` | three to five items kept for the user, with what was left out |
+| | `results` | search results |
+| | `link` | a page you read |
+| | `quote` | a quoted passage, with who wrote it |
+| Inform | `notice` | one line of information, never a decision |
+| Objects | the type of the object (`mail`, `event`, `place`, `file`, `thread`, `image`, `contact`, `receipt`, `product`, `route`, `weather`, `media`, `device`) | when it exists |
+| | `object` with a `kind` | otherwise |
+| Provenance | `source` | where what you show or propose comes from, in one line |
+
 ## Rules
 
 - Numbers go in a block, not in a sentence that lists them. Add one sentence before or after that says
   what matters.
-- Something Léo must decide: an `ask` block whose `primary` button names the action ("Ajouter",
-  "Programmer", "Télécharger") and whose `secondary` button declines ("Plus tard", "Pas maintenant").
-- An appointment, a place, a file, a draft: the block of that object (`event`, `place`, `file`,
-  `draft`), with its buttons.
-- At most three blocks per message; beyond that, one `card` that groups them.
+- A decision to take now, in the chat: an `ask` whose `primary` button names the action ("Ajouter",
+  "Programmer", "Télécharger") and whose `secondary` button declines ("Plus tard", "Pas maintenant"),
+  or a `choice` whose `submit` names the action; a decision that can wait goes to `sheldon_propose`.
+- An appointment, a place, a file, a draft, a mail: the block of that object (`event`, `place`,
+  `file`, `draft`, `mail`), with its buttons.
+- Put the whole content in the block, never a shortened one: every row of a list or a table (up to its
+  limit), every step, an event's full description and attendees, a mail's addresses, subject, date
+  and full text. Sheldon makes the short preview itself and opens the whole block on a tap: never
+  cut, shorten or summarize what goes inside a block.
+- A mail, received or drafted, comes whole: the addresses (`"Camille Roy <camille.roy@exemple.com>"`),
+  the subject, the date and the full text.
+- When what you show or propose comes from somewhere (a mail, a message, an invitation, a page, a
+  file), always attach its provenance with the whole original message: a `source` block in your
+  reply or in a Fil delivery, the `source` argument of `sheldon_propose` for a request. The user sees where
+  it comes from in one line and opens the original to answer it.
+- Default: three blocks, then one `card` that groups them.
 - Put `highlight` on the value that matters: Sheldon draws it in ink, the others in gray.
 - Several blocks: several fences, or a JSON array of objects in one fence. An object without `type`
   but with `blocks` is a card.
@@ -46,240 +114,112 @@ Le pic de samedi vient de ta story Instagram.
   `2026-09-26T20:00+02:00`. Times alone: `09:30`, `9h30`, `14h`.
 - `title`, `subtitle` (the context: "Épisode 42 · 7 derniers jours") and `footer` (the source) frame
   almost every block.
-- Write in Léo's language (French): non-breaking space before `:`, `?`, `!`, `%` and units, and inside
-  « », and the typographic apostrophe `’` (`l’épisode`, `C’est fait`), never `'` outside code.
-- A button without a link sends Léo's answer back to you as an ordinary message,
-  `label · subject` (for example `Programmer · Publier l’épisode 43 demain à 8 h ?`). Treat it as his
+- Write in the user's language; in French, apply a non-breaking space before `:`, `?`, `!`, `%` and
+  units, and inside « », and the typographic apostrophe `’` (`l’épisode`, `C’est fait`), never `'`
+  outside code.
+- A button without a link sends the user's answer back to you as an ordinary message,
+  `label · subject` (for example `Programmer · Publier l’épisode 43 demain à 8 h ?`). Treat it as their
   answer to your previous message. A button `{"label", "url"}` only opens the link (https, http or
-  maps); it sends nothing.
-- Never put anything else in a `sheldon` fence. An unknown type or a missing required field is shown
-  to Léo as plain text: nothing breaks, but nothing is drawn either.
+  maps; in a `contact`, also `tel:`, `sms:` and `mailto:`); it sends nothing.
+- Never put anything else in a `sheldon` fence. What Sheldon cannot draw follows the fallback of the
+  contract: nothing breaks.
 
-## Catalogue
+## Blocks
 
-Each type: its fields (required ones in bold), an example, when to use it. Other accepted names are in
-parentheses.
+### Mails and messages
 
-### Figures
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/mails-messages.md").
 
-**`metric`** (`kpi`): one key figure. **`value`** (number or text), `unit`, `label`, `delta`
-("+18 %", its sign gives the direction), `trend` (`up`, `down`, `flat`), `good` (the direction that is
-good news, `up` by default), `caption`, `spark` (up to 60 numbers for a small line).
+- `mail`: a mail received or sent, whole: people, subject, date, text
+- `draft`: a draft ready to go (a mail, a message, a post), shown as it will leave
+- `source`: where what you show comes from, in one line, with the whole original message
+- `thread`: several messages of a conversation read elsewhere (iMessage, WhatsApp, Slack, SMS), with a reply button
+- `contact`: the person you are talking about: role, details, last exchange; may call, text or mail
 
-```sheldon
-{"type": "metric", "subtitle": "Épisode 42 · 7 derniers jours", "value": 1284, "unit": "écoutes", "delta": "+18 % par rapport à l’épisode 41", "caption": "Le pic de samedi vient de ta story Instagram."}
-```
+### Calendar and time
 
-**`stats`**: two to four figures side by side. **`items`** (`[{label, value, delta?}]`, four at most).
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/calendar-time.md").
 
-```sheldon
-{"type": "stats", "items": [{"label": "lus", "value": 14}, {"label": "archivés", "value": 3}, {"label": "brouillons", "value": 2}]}
-```
+- `event`: an appointment: when, where, with whom, and its whole description
+- `schedule`: one day of appointments, with its free slots
+- `timeline`: dated moments: what happened, what comes next
+- `routine`: a scheduled task: its rhythm, its next run, its last runs and its skills
 
-### Change over time
+### Figures, tables and charts
 
-**`line`**: a line over time. **`points`** (`[{label, value}]`, 2 to 60) or **`values`** + `labels`,
-`unit`, `highlight` (index of the point to name, the last by default), `area` (`true` by default).
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/figures-charts.md").
 
-```sheldon
-{"type": "line", "subtitle": "Écoutes par épisode · 30 jours", "points": [{"label": "Ép. 38", "value": 820}, {"label": "39", "value": 910}, {"label": "40", "value": 760}, {"label": "41", "value": 1090}, {"label": "42", "value": 1284}]}
-```
+- `metric`: one key figure, with its change
+- `stats`: two to four figures side by side
+- `line`: a line over time
+- `bars`: vertical bars over days or weeks
+- `horizontalBars`: a ranking, longest bar first
+- `groupedBars`: two or three series per label
+- `range`: a low and a high per row (weather, prices)
+- `donut`: parts of a whole
+- `meter`: a gauge (disk, battery, quota)
+- `progress`: a progress bar
+- `ring`: a goal as a ring
+- `heatmap`: a grid of days, like an activity calendar
+- `compare`: two or three options, one recommended
+- `table`: a table, check marks included
+- `rating`: a score in stars, or, with ask, the user's opinion on recurring work
 
-**`bars`**: vertical bars (days, weeks). **`bars`** (`[{label, value}]`, 24 at most) or **`values`** +
-`labels`, `unit`, `highlight`, `source`.
+### Web and search
 
-```sheldon
-{"type": "bars", "subtitle": "Écoutes par jour", "values": [440, 590, 510, 670, 560, 1284, 790], "labels": ["L", "M", "M", "J", "V", "S", "D"], "highlight": 5}
-```
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/web-search.md").
 
-**`groupedBars`**: two or three series per label. **`labels`**, **`series`** (`[{name, values}]`,
-three at most), `unit`.
+- `link`: a page you read: its site, its title, its summary and three points; opened from the full view
+- `results`: search results (web, mail, notes): the query, ten results at most, each with its link
+- `digest`: a briefing: three to five items kept for the user, each with why, and how many were left out
 
-```sheldon
-{"type": "groupedBars", "subtitle": "Heures par jour", "labels": ["Lun", "Mar", "Mer", "Jeu", "Ven"], "series": [{"name": "Réunions", "values": [3, 5, 2, 4, 1]}, {"name": "Concentration", "values": [4, 2, 5, 3, 6]}], "unit": "h"}
-```
+### Tasks, projects and diagrams
 
-**`range`**: a low and a high per row (weather, prices). **`ranges`** (`[{label, low, high}]`), `unit`,
-`highlight`, `current` (today's value, as a dot on the highlighted row).
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/tasks-projects.md").
 
-```sheldon
-{"type": "range", "subtitle": "Paris · 5 jours", "unit": "°", "highlight": 0, "current": 19, "ranges": [{"label": "Auj.", "low": 13, "high": 22}, {"label": "Ven", "low": 12, "high": 20}, {"label": "Sam", "low": 14, "high": 24}]}
-```
+- `task`: a task in steps: what will be done, or how far a plan has got
+- `activity`: what you did on your own, or are doing, line by line, errors first, with undo
+- `todo`: a list the user ticks off themselves, then sends in one message
+- `diff`: two versions of a code or a text, line by line, read only
+- `status`: the state of services, problems first
+- `flow`: steps that follow each other
+- `graph`: linked topics, one in the middle
 
-### Parts of a whole
+### Home, places and trips
 
-**`donut`** (`pie`): parts of a whole. **`parts`** (`[{label, value}]`, at least 2; beyond 6 the last
-ones become "Autres"), `center` (text in the middle), `unit`.
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/home-places.md").
 
-```sheldon
-{"type": "donut", "subtitle": "D’où viennent les écoutes", "center": "1 284", "parts": [{"label": "Spotify", "value": 610}, {"label": "Apple Podcasts", "value": 380}, {"label": "YouTube", "value": 210}, {"label": "Autres applis", "value": 84}]}
-```
+- `place`: a place, with its map when coordinates are given
 
-**`meter`** (`gauge`): a gauge (disk, battery, quota). **`value`** (or `percent`), `max` (100 by
-default), `label`, `caption`.
+### Media and files
 
-```sheldon
-{"type": "meter", "title": "Disque de l'ordinateur d'Hermes", "value": 72, "label": "Utilisé", "caption": "140 Go libres sur 512 Go"}
-```
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/media-files.md").
 
-### Progress
+- `file`: a file you produced or found, opened whole on a tap when it has its id
+- `image`: one to six images by the id of their file (never a URL), always with their alternative text
 
-**`progress`**: a progress bar. **`value`** and `total` (100 by default), or **`percent`**; `label`,
-`caption`.
+### Decisions
 
-```sheldon
-{"type": "progress", "title": "Montage de l’épisode 43", "value": 3, "total": 4, "label": "Étapes", "caption": "Reste la miniature"}
-```
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/decisions.md").
 
-**`ring`**: a goal as a ring. **`value`**, `total` (or `goal`), `label`, `center`, `caption`.
+- `ask`: a question to answer now, in the chat, with two buttons
+- `choice`: one option out of two to six (or several), answered in one message; the message field stays free
+- `form`: two to five pieces of information at once, sent in one message on a tap; never a secret
+- `variants`: two to four versions of the same text or visual, side by side; the pick answers in one message
 
-```sheldon
-{"type": "ring", "value": 1284, "total": 1500, "label": "Objectif du mois", "center": "86 %", "caption": "216 écoutes à trouver"}
-```
+### Learning and permissions
 
-**`task`** (`checklist`): a task in steps. **`steps`** (`[{title, state}]`, `state`: `done`,
-`running`, `pending`, `failed`; 20 at most), or **`total`** and `done` without detail.
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/learning.md").
 
-```sheldon
-{"type": "task", "title": "Résumer la veille design", "steps": [{"title": "Collecter 42 articles", "state": "done"}, {"title": "Écrire les résumés", "state": "running"}, {"title": "T’envoyer la sélection", "state": "pending"}]}
-```
+- `learned`: what you kept or learned (a memory, a preference, a skill), with why and a forget button
+- `rules`: what you may do on your own, each rule with its remove button
 
-### Ranking
+### Layout and fallback
 
-**`horizontalBars`**: a ranking, longest bar first. Same fields as `bars`.
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/layout.md").
 
-```sheldon
-{"type": "horizontalBars", "subtitle": "Sujets les plus cités cette semaine", "bars": [{"label": "IA et design", "value": 18}, {"label": "Liquid Glass", "value": 11}, {"label": "Accessibilité", "value": 7}], "highlight": 0, "source": "42 articles, 16-23 sept."}
-```
-
-### Regularity
-
-**`heatmap`**: a grid of days, like an activity calendar. **`days`** (numbers, oldest first, or
-`[{date, value}]`; 371 at most) or **`values`**, `start` (date of the first day), `headline`.
-
-```sheldon
-{"type": "heatmap", "subtitle": "Jours où tu as écouté un épisode", "headline": "21 jours", "start": "2026-07-27", "days": [1, 0, 2, 1, 0, 0, 3, 1, 1, 0, 2, 2, 0, 1]}
-```
-
-### Time
-
-**`timeline`**: what happened, what comes next. **`steps`** (`[{title, time?, detail?, state}]`,
-`state`: `done`, `current`, `upcoming`, `failed`).
-
-```sheldon
-{"type": "timeline", "steps": [{"title": "Repéré dans Messages", "time": "18:02", "state": "done"}, {"title": "Proposé par Hermes", "time": "18:03", "state": "done"}, {"title": "À toi de décider", "time": "maintenant", "state": "current"}]}
-```
-
-**`schedule`**: one day, with its free slots. **`events`** (`[{title, start, end?, place?}]`), `now`.
-
-```sheldon
-{"type": "schedule", "subtitle": "Demain, jeudi", "now": "08:40", "events": [{"title": "Point d’équipe", "start": "09:30", "end": "10:00"}, {"title": "Déjeuner avec Patrick", "start": "13:00", "end": "14:00", "place": "Le Mary Céleste"}]}
-```
-
-### Comparison
-
-**`compare`**: two or three options, one recommended. **`options`**
-(`[{name, value?, points?, pick?, badge?}]`, 2 to 3; `points`: 4 at most).
-
-```sheldon
-{"type": "compare", "title": "Quel outil pour le prototype ?", "options": [{"name": "Figma Make", "value": "Le plus fidèle", "points": ["Prototype interactif", "Reprend ton design system"], "pick": true}, {"name": "v0", "value": "Le plus rapide", "points": ["Code React prêt"]}]}
-```
-
-**`table`**: a table, check marks included. **`columns`** (5 at most, the first may be empty),
-**`rows`** (30 at most; `true` and `false` become check marks), `highlight` (index of the recommended
-column).
-
-```sheldon
-{"type": "table", "columns": ["", "Figma Make", "Stitch", "v0"], "highlight": 1, "rows": [["Prototype", true, true, false], ["Code", false, false, true], ["Prix", "20 $", "0 $", "20 $"]]}
-```
-
-### Everyday objects
-
-These four may carry two buttons: `action` (the main one) and `secondary`, or `actions` (an array of
-two). A button is a label (it answers you) or `{label, url}` (it opens the link).
-
-**`event`** (`calendar`): an appointment. **`title`**, **`start`**, `end`, `place`, `note`.
-
-```sheldon
-{"type": "event", "title": "Dîner avec Paul", "start": "2026-09-26T20:00", "end": "2026-09-26T22:00", "place": "Le Mary Céleste, Paris", "action": "Ajouter", "secondary": "Plus tard"}
-```
-
-**`place`** (`location`, `map`): a place, with its map when coordinates are given. **`name`**,
-`address`, `latitude` and `longitude`, `note`.
-
-```sheldon
-{"type": "place", "name": "Le Mary Céleste", "address": "1 rue Commines, 75003 Paris", "latitude": 48.8625, "longitude": 2.3656, "note": "12 min à pied", "action": {"label": "Y aller", "url": "https://maps.apple.com/?daddr=48.8625,2.3656"}}
-```
-
-**`file`**: a file you produced or found. **`name`**, `kind` (`pdf`, `audio`, `video`, `image`,
-`document`, `sheet`, `slides`, `archive`, `code`, `other`; otherwise from the extension), `detail`
-("38 min · 52 Mo"), `url`.
-
-```sheldon
-{"type": "file", "name": "episode-43.mp3", "detail": "38 min · 52 Mo", "action": {"label": "Télécharger", "url": "https://example.com/episode-43.mp3"}}
-```
-
-**`draft`**: a draft ready to go. **`body`**, `channel` (`mail`, `message`, `post`; `mail` by default),
-`to`, `subject`.
-
-```sheldon
-{"type": "draft", "channel": "mail", "to": "Marie", "subject": "Re : jeudi", "body": "Oui pour jeudi, je t’envoie la maquette ce soir.", "action": "Envoyer", "secondary": "Garder en brouillon"}
-```
-
-### Status
-
-**`status`**: the state of services, problems first. **`items`** (`[{label, state, detail?}]`,
-`state`: `ok`, `warning`, `error`, `off`, `info`), `summary`.
-
-```sheldon
-{"type": "status", "title": "Ordinateur d’Hermes", "summary": "Une sauvegarde à relancer", "items": [{"label": "Passerelle d’Hermes", "state": "ok"}, {"label": "Sauvegarde Time Machine", "state": "error", "detail": "Disque externe absent depuis 3 h 12"}]}
-```
-
-### Diagrams
-
-**`flow`**: steps that follow each other. **`steps`** (at least 2; strings or `[{title, detail?}]`).
-
-```sheldon
-{"type": "flow", "title": "Comment je fais ta veille", "steps": [{"title": "Collecte", "detail": "42 articles"}, {"title": "Tri", "detail": "5 retenus"}, {"title": "Résumé"}, {"title": "Envoi", "detail": "7 h 30"}]}
-```
-
-**`graph`**: linked topics, one in the middle. **`nodes`** (`[{id, label, main?}]`, 2 to 12), `edges`
-(`[{from, to}]`).
-
-```sheldon
-{"type": "graph", "title": "Les sujets de la semaine", "nodes": [{"id": "ia", "label": "IA", "main": true}, {"id": "ux", "label": "UX"}, {"id": "figma", "label": "Figma"}], "edges": [{"from": "ia", "to": "ux"}, {"from": "ia", "to": "figma"}]}
-```
-
-### Question
-
-**`ask`** (`question`): a two-button question inside the chat. **`question`**, **`primary`** (the
-button that names the action), `secondary` (the button that declines; "Pas maintenant" by default),
-`detail`, `id`, `deadline`.
-
-```sheldon
-{"type": "ask", "question": "Publier l’épisode 43 demain à 8 h ?", "detail": "Spotify, Apple Podcasts, YouTube", "primary": "Programmer", "secondary": "Pas maintenant"}
-```
-
-A request that must wait for Léo outside the chat (Requests tab, orange badge, notification) goes
-through your `clarify` tool or the `sheldon_propose` tool, not through `ask`.
-
-### Layout
-
-**`list`**: rows, each with a link or a button. **`items`** (`[{title, subtitle?, value?, url?, action?}]`,
-20 at most).
-
-```sheldon
-{"type": "list", "title": "Archivés", "items": [{"title": "Figma", "subtitle": "Les replays de Config sont en ligne", "action": "Restaurer"}, {"title": "Medium", "subtitle": "Ta sélection de la semaine", "action": "Restaurer"}]}
-```
-
-**`card`**: several blocks in one frame (one level: a card inside a card is flattened). **`blocks`**.
-
-```sheldon
-{"type": "card", "subtitle": "Épisode 42 · 7 derniers jours", "blocks": [{"type": "metric", "value": 1284, "unit": "écoutes", "delta": "+18 %"}, {"type": "bars", "values": [440, 590, 510, 670, 560, 1284, 790], "labels": ["L", "M", "M", "J", "V", "S", "D"], "highlight": 5}]}
-```
-
-**`text`**: a framed paragraph (inline Markdown allowed). **`text`**, `title`.
-
-```sheldon
-{"type": "text", "title": "En bref", "text": "Le montage est **fini**, il reste la miniature."}
-```
+- `notice`: one line of information (done, warning, error), never a decision
+- `text`: a framed paragraph
+- `list`: rows, each with a link or a button; a row may carry a whole mail
+- `card`: several blocks in one frame
+- `object`: anything the catalogue has no block for; also how an unknown type is drawn

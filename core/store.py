@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from .sqlite import open_database
+from .sqlite import ensure_columns, open_database
 
 CLIENT_MESSAGE_RETENTION_SECONDS = 7 * 86400
 # La fenêtre du plafond d'offres de l'outil sheldon_pair.
@@ -147,6 +147,8 @@ class DeviceStore:
         # L'identifiant du serveur ne change jamais une fois écrit : lu une fois, gardé ici.
         self._server_id: Optional[str] = None
         self._conn = open_database(self._path, _SCHEMA)
+        # Spec 3.2 : la version du catalogue des blocs que dessine chaque appareil (context.catalog).
+        ensure_columns(self._conn, "devices", {"catalog": "INTEGER"})
 
     @property
     def path(self) -> Path:
@@ -201,7 +203,7 @@ class DeviceStore:
         tool_limit : une offre plafonnée (l'outil sheldon_pair ou la route /v1/pair/offers,
         qui partagent ce même compteur horaire), refusée (None) quand le plafond de l'heure est
         déjà atteint. La commande (tool_limit None) n'est ni limitée ni comptée : un agent ne
-        peut pas empêcher Léo de relier un appareil.
+        peut pas empêcher l'utilisateur de relier un appareil.
         """
         now = self._clock()
         expires_at = now + ttl_seconds
@@ -306,6 +308,19 @@ class DeviceStore:
                 "UPDATE devices SET last_seen_at = ? WHERE id = ?", (self._clock(), device_id)
             )
 
+    def set_catalog(self, device_id: str, version: int) -> None:
+        """La version du catalogue des blocs que cet appareil dit dessiner (spec 3.2)."""
+        with self._lock:
+            self._conn.execute("UPDATE devices SET catalog = ? WHERE id = ?", (version, device_id))
+
+    def oldest_catalog(self) -> Optional[int]:
+        """Le plus petit catalogue des appareils qui l'ont dit ; None si aucun ne l'a dit. Un
+        appareil qui ne l'a jamais envoyé (une app d'avant blockNotes) est ignoré : le compter
+        priverait aussi l'appareil à jour des nouveaux blocs (spec 3.2)."""
+        with self._lock:
+            row = self._conn.execute("SELECT MIN(catalog) AS oldest FROM devices WHERE catalog IS NOT NULL").fetchone()
+        return int(row["oldest"]) if row is not None and row["oldest"] is not None else None
+
     def list_devices(self) -> List[Device]:
         with self._lock:
             rows = self._conn.execute(
@@ -317,7 +332,7 @@ class DeviceStore:
         """Retire un appareil (route ou commande hermes sheldon revoke).
 
         Un retrait annule aussi toute offre active, quelle que soit son origine (outil, commande
-        ou route) : c'est le geste d'alarme de Léo, et refaire un QR code coûte peu. Sans ce
+        ou route) : c'est le geste d'alarme de l'utilisateur, et refaire un QR code coûte peu. Sans ce
         ménage, quelqu'un qui tient encore une clé et le tailnet garderait toujours une longueur
         d'avance (chaque appareil relié rouvrant aussitôt l'offre suivante) sur un retrait qui ne
         chasserait plus personne (tâche 18, relecture I2). Le PNG de l'outil, périmé, est effacé

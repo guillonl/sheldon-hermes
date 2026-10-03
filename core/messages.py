@@ -69,9 +69,9 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "chat_not_found": "Aucune conversation ne porte cet identifiant : hermes sheldon chats list les montre toutes.",
         "chat_protected": "Seules les conversations de sujet se retirent : la conversation principale et celles des agents restent.",
         "chat_refused": "Commande refusée par Sheldon.",
-        "pair_tool_reply": "Dis à Léo, dans la langue de cette conversation : « Installe Tailscale sur ton téléphone et connecte-le avec le même compte que cet ordinateur, puis scanne ce QR code avec Sheldon. » Ajoute que, sur le téléphone qui affiche l'image, un appui long dessus ouvre aussi Sheldon, et que le code vaut {minutes} minutes, une seule fois.",
+        "pair_tool_reply": "Dis à l'utilisateur, dans la langue de cette conversation : « Installe Tailscale sur ton téléphone et connecte-le avec le même compte que cet ordinateur, puis scanne ce QR code avec Sheldon. » Ajoute que, sur le téléphone qui affiche l'image, un appui long dessus ouvre aussi Sheldon, et que le code vaut {minutes} minutes, une seule fois.",
         "pair_tool_disabled": "Sheldon est désactivé sur cet ordinateur.",
-        "pair_tool_not_here": "Le QR code de Sheldon ne se donne qu'en réponse à un message de Léo dans une conversation, jamais dans une tâche planifiée ou automatique. Recours : hermes sheldon pair, par SSH.",
+        "pair_tool_not_here": "Le QR code de Sheldon ne se donne qu'en réponse à un message de l'utilisateur dans une conversation, jamais dans une tâche planifiée ou automatique. Recours : hermes sheldon pair, par SSH.",
         "pair_tool_limit": "Déjà {count} QR codes demandés cette heure-ci : réessaie plus tard, ou lance hermes sheldon pair par SSH.",
         "pair_needs_terminal": "Lance cette commande toi-même dans un terminal.",
         "funnel_open": "Tailscale Funnel est ouvert sur ce Mac et l'expose à Internet. Ferme Funnel (tailscale funnel status montre ce qui est ouvert), puis relance : hermes sheldon pair. Sheldon ne doit être joignable que depuis ton tailnet.",
@@ -148,9 +148,9 @@ TEXTS: Dict[str, Dict[str, str]] = {
         "chat_not_found": "No conversation has this identifier: hermes sheldon chats list shows them all.",
         "chat_protected": "Only topic conversations can be removed: the main conversation and the agent ones stay.",
         "chat_refused": "Command refused by Sheldon.",
-        "pair_tool_reply": "Tell Léo, in the language of this conversation: \"Install Tailscale on your phone and connect it with the same account as this computer, then scan this QR code with Sheldon.\" Add that on the phone that shows the image, a long press on it also opens Sheldon, and that the code works for {minutes} minutes, once.",
+        "pair_tool_reply": "Tell the user, in the language of this conversation: \"Install Tailscale on your phone and connect it with the same account as this computer, then scan this QR code with Sheldon.\" Add that on the phone that shows the image, a long press on it also opens Sheldon, and that the code works for {minutes} minutes, once.",
         "pair_tool_disabled": "Sheldon is disabled on this computer.",
-        "pair_tool_not_here": "Sheldon's QR code is only given in reply to a message from Léo in a conversation, never in a scheduled or automatic task. Fallback: hermes sheldon pair, over SSH.",
+        "pair_tool_not_here": "Sheldon's QR code is only given in reply to a message from the user in a conversation, never in a scheduled or automatic task. Fallback: hermes sheldon pair, over SSH.",
         "pair_tool_limit": "Already {count} QR codes requested this hour: try again later, or run hermes sheldon pair over SSH.",
         "pair_needs_terminal": "Run this command yourself in a terminal.",
         "funnel_open": "Tailscale Funnel is open on this Mac and exposes it to the Internet. Turn Funnel off (tailscale funnel status shows what is open), then run again: hermes sheldon pair. Sheldon must only be reachable from your tailnet.",
@@ -181,7 +181,7 @@ _ENGLISH_WORDS = re.compile(
 
 
 def chat_language(texts: Sequence[str], default: str) -> str:
-    """La langue d'un chat, lue dans les derniers messages de Léo (le plus récent d'abord) : le
+    """La langue d'un chat, lue dans les derniers messages de l'utilisateur (le plus récent d'abord) : le
     premier qui a un mot français ou anglais la donne ; sinon `default`."""
     for text in texts:
         lower = text.lower()

@@ -453,6 +453,9 @@ async def _send_message(request: web.Request) -> web.Response:
         context = parse_context(body.get("context"))
     except ContextError:
         raise ApiError(400, "invalid_request")
+    if context is not None and context.catalog is not None:
+        # Spec 3.2 : la version du catalogue des blocs que dessine cet appareil, rangée sur lui.
+        ctx.store.set_catalog(device.id, context.catalog)
     if not ctx.store.remember_client_message(client_message_id, device.id):
         # Un renvoi peut arriver pendant que la première soumission est encore en cours : on
         # attend son issue plutôt que de répondre au hasard avant de la connaître, sans quoi

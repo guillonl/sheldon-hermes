@@ -5,7 +5,7 @@ question, un appel décroché : l'app le dit, l'extension le vérifie et le rend
 faits, puis les règles courtes d'un tour dit), que le crochet pre_llm_call (__init__.py) ajoute à
 la copie du message que reçoit le modèle. Hermes la garde avec ce message (colonne api_content de
 sa base) et la redonne au modèle aux tours suivants : c'est ce qui tient le cache du prompt.
-Jamais dans le prompt système, et Léo ne la voit jamais dans son chat (l'historique lit content).
+Jamais dans le prompt système, et l'utilisateur ne la voit jamais dans son chat (l'historique lit content).
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import threading
 import unicodedata
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .text import clean_free_text
 
@@ -23,6 +23,23 @@ MAX_SPOKEN_LENGTH = 500
 MAX_QUESTION_LENGTH = 200
 MAX_LABEL_LENGTH = 30
 MAX_REMEMBERED = 64
+# Spec 3.2 : les retours de l'app sur les blocs qu'elle n'a pas pu dessiner, et les constats.
+UNDRAWN_REASONS = ("unknownType", "missingField", "unreadable")
+MAX_UNDRAWN = 5
+# La place qui reste pour les constats persistés (notices.py) une fois feedback et undrawn posés ;
+# ne plafonne plus leur somme (plan 8, correctifs finaux, I1 : les deux plafonds sont séparés).
+MAX_NOTES = 5
+MAX_CATALOG = 99
+# L'avis d'un toucher (« Plus de ça », « Moins de ça ») sur un rapport, spec 3.2 et A9.
+FEEDBACK_VALUES = ("more", "less")
+MAX_FEEDBACK = 3
+MAX_FEEDBACK_TITLE = 80
+# Le plafond garanti de la ligne : feedback et undrawn sont déjà bornés chacun de leur côté (3 et
+# 5, alignés sur ConversationStore.swift) ; aucun des deux ne doit jamais être coupé pour l'autre.
+MAX_FEEDBACK_AND_UNDRAWN = MAX_FEEDBACK + MAX_UNDRAWN
+_BLOCK_TYPE = re.compile(r"[A-Za-z0-9_ -]{1,40}")
+_FIELD = re.compile(r"[A-Za-z0-9_]{1,40}")
+_CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d")
 _MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}")
 _CALL_ID = re.compile(r"c-[0-9a-f]{32}")
 # La langue de la voix de l'app (Réglages › Voix) : une étiquette BCP 47 courte, « fr », « en-CA ».
@@ -32,19 +49,21 @@ _SURFACE_LINES = {
     "voiceMode": "Spoken aloud in Sheldon's voice mode: your reply is read aloud as you write it.",
     "call": "Spoken aloud during a phone call with you: your reply is read aloud as you write it.",
 }
-# Les règles de PLATFORM_HINT pour un tour dit, en court : une session déjà ouverte garde le prompt
-# système rangé avec elle (agent/conversation_loop.py), sans les règles d'une version plus récente.
-# Mots de Léo (2026-10-02) : une conversation vivante, comme un vrai assistant au téléphone, qui dit
-# "OK, je m'en occupe" avant un travail long et relance naturellement ("Autre chose ?").
+# Les règles d'un tour dit (spec 4.5), dans la note de chaque tour dit : le hint y renvoie, et une
+# session déjà ouverte garde le prompt système rangé avec elle (agent/conversation_loop.py). Le
+# physique reste ferme (une voix lit la réponse, une commande ne s'approuve jamais à la voix) ; la
+# longueur, l'accusé avant un outil et la relance sont des défauts. Demande du 2026-10-02 : une
+# conversation vivante, comme un vrai assistant au téléphone, qui dit "OK, je m'en occupe" avant
+# un travail long et relance naturellement ("Autre chose ?").
 _SPOKEN_RULES = (
-    "Reply in two or three short sentences, the answer first, without Markdown. Before a tool or anything "
-    "that takes a moment, say so right away in one short natural sentence (such as \"OK, I'm on it\" or "
-    "\"Let me check that\"), then do it and give the result after, in one or two sentences. For a decision "
-    "you need from the user, not a terminal command, ask with clarify or sheldon_propose in a short spoken "
-    "question a plain \"yes\" can answer; a command waiting on its approval card is never approved that way, "
-    "so just say in one short sentence that you need it there. When it fits naturally, end with a short, "
-    "varied follow-up such as \"Anything else?\"; never after every sentence, and never after a goodbye. "
-    "Put details in one sheldon block after your sentences."
+    "Spoken aloud: this reply is read by a voice as you write it, so it has no Markdown, lists, tables or "
+    "emoji, and what the user should see goes in one sheldon block after your sentences (blocks are shown, "
+    "never read). A command waiting on its approval card is never approved by voice: say in one short "
+    "sentence that it waits on its card. By default: the answer first, in two or three short sentences; "
+    "before a tool or a long step, one short natural sentence saying what you are doing (such as \"OK, I'm "
+    "on it\"); a decision the user can answer with a plain \"yes\" goes through clarify or sheldon_propose as "
+    "a short spoken question; a short, varied follow-up such as \"Anything else?\" when it fits, never after "
+    "every sentence and never after a goodbye."
 )
 
 
@@ -75,6 +94,23 @@ class ContextError(ValueError):
 
 
 @dataclass(frozen=True)
+class Undrawn:
+    """Un bloc qu'Hermes a écrit et que l'app n'a pas pu dessiner tel quel (spec 3.2)."""
+    reason: str
+    type: Optional[str] = None
+    field: Optional[str] = None
+    time: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Feedback:
+    """L'avis d'un toucher sur un rapport d'Hermes (spec 3.2, A9) : « Plus de ça » ou « Moins de ça »."""
+    on: str
+    value: str
+    time: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class TurnContext:
     surface: Optional[str] = None
     interrupted: bool = False
@@ -85,6 +121,9 @@ class TurnContext:
     call_id: Optional[str] = None
     device_locked: bool = False
     language: Optional[str] = None
+    catalog: Optional[int] = None
+    undrawn: Tuple[Undrawn, ...] = ()
+    feedback: Tuple[Feedback, ...] = ()
 
 
 def parse_context(value: Any) -> Optional[TurnContext]:
@@ -123,15 +162,109 @@ def parse_context(value: Any) -> Optional[TurnContext]:
         question = _text(answering.get("question"), MAX_QUESTION_LENGTH)
     context = TurnContext(
         surface, interrupted is not None, message_id, spoken, question, label, call_id, device_locked is True, language,
+        catalog=_catalog(value.get("catalog")), undrawn=_undrawn(value.get("undrawn")),
+        feedback=_feedback(value.get("feedback")),
     )
     return None if context == TurnContext() else context
 
 
-def render_context(context: TurnContext, placed_call: Optional[str] = None) -> Optional[str]:
-    """La ligne ajoutée au message de Léo pour ce tour, en anglais comme PLATFORM_HINT : les faits,
-    puis, pour un tour dit à voix haute, ses règles courtes ; None s'il n'y a rien à dire.
-    `placed_call` : la raison de l'appel rangé par l'extension (CallStore, jamais un texte de
-    l'app), "" pour un appel sans raison ; None : pas d'appel connu."""
+def _catalog(value: Any) -> Optional[int]:
+    """La version du catalogue que dessine l'appareil, de 1 à 99 ; sinon None, jamais un refus :
+    ce ne sont pas les mots de l'utilisateur (spec 3.2)."""
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= MAX_CATALOG:
+        return value
+    return None
+
+
+def _undrawn(value: Any) -> Tuple[Undrawn, ...]:
+    """Les blocs que l'app n'a pas pu dessiner, cinq au plus. Une entrée qui ne suit pas ses
+    motifs est sautée, jamais refusée : un diagnostic ne coûte jamais un message (spec 3.2)."""
+    if not isinstance(value, list):
+        return ()
+    found: List[Undrawn] = []
+    for item in value:
+        if len(found) == MAX_UNDRAWN:
+            break
+        if not isinstance(item, dict):
+            continue
+        reason, block_type, field, time = (item.get(key) for key in ("reason", "type", "field", "time"))
+        if reason not in UNDRAWN_REASONS:
+            continue
+        if block_type is None:
+            if reason != "unreadable":
+                continue
+        elif not isinstance(block_type, str) or not _BLOCK_TYPE.fullmatch(block_type):
+            continue
+        if field is not None and (reason != "missingField" or not isinstance(field, str) or not _FIELD.fullmatch(field)):
+            continue
+        if time is not None and (not isinstance(time, str) or not _CLOCK.fullmatch(time)):
+            continue
+        found.append(Undrawn(reason, block_type, field, time))
+    return tuple(found)
+
+
+def _feedback(value: Any) -> Tuple[Feedback, ...]:
+    """Les avis d'un toucher, trois au plus, mêmes règles qu'`undrawn` : une entrée qui ne suit pas
+    ses motifs est sautée, jamais refusée. Le titre perd ses caractères de contrôle, tient sur une
+    ligne et fait 80 caractères au plus."""
+    if not isinstance(value, list):
+        return ()
+    found: List[Feedback] = []
+    for item in value:
+        if len(found) == MAX_FEEDBACK:
+            break
+        if not isinstance(item, dict):
+            continue
+        on, mark, time = (item.get(key) for key in ("on", "value", "time"))
+        if not isinstance(on, str) or mark not in FEEDBACK_VALUES:
+            continue
+        title = " ".join(clean_free_text(on).split())
+        if not title or len(title) > MAX_FEEDBACK_TITLE:
+            continue
+        if time is not None and (not isinstance(time, str) or not _CLOCK.fullmatch(time)):
+            continue
+        found.append(Feedback(title, mark, time))
+    return tuple(found)
+
+
+def feedback_line(item: Feedback) -> str:
+    """L'avis de l'utilisateur sur un rapport : un constat, jamais un ordre ; à toi d'en faire une préférence."""
+    when = f" of {item.time}" if item.time else ""
+    return f'The user marked your report "{_quoted(item.on)}"{when} as "{item.value} of this".'
+
+
+def undrawn_line(item: Undrawn) -> str:
+    """Un bloc que l'app n'a pas pu dessiner tel qu'Hermes l'a écrit : un constat, jamais un ordre."""
+    when = f" of {item.time}" if item.time else ""
+    if item.reason == "unknownType":
+        return f"Sheldon does not know your `{item.type}` block{when}; the user saw its fallback."
+    if item.reason == "missingField":
+        cause = f"`{item.field}` was missing" if item.field else "a required field was missing or unusable"
+        return f"Sheldon could not draw your `{item.type}` block{when} ({cause}); the user saw its fallback."
+    named = f"your `{item.type}` block" if item.type else "one of your blocks"
+    return f"Sheldon could not read {named}{when} (invalid JSON); the user saw its fallback."
+
+
+def expired_line(title: str) -> str:
+    return f'Your request "{_quoted(title)}" expired without an answer.'
+
+
+def catalog_line(version: int) -> str:
+    return (
+        f"One of the user's devices runs an older Sheldon that draws block catalogue version {version}: "
+        "newer blocks show as their fallback there."
+    )
+
+
+def render_context(
+    context: Optional[TurnContext], placed_call: Optional[str] = None, notes: Sequence[str] = ()
+) -> Optional[str]:
+    """La ligne ajoutée au message de l'utilisateur pour ce tour, en anglais comme PLATFORM_HINT : les faits,
+    puis les constats (`notes`, cinq au plus, spec 3.2), puis, pour un tour dit à voix haute, ses
+    règles courtes ; None s'il n'y a rien à dire. `placed_call` : la raison de l'appel rangé par
+    l'extension (CallStore, jamais un texte de l'app), "" pour un appel sans raison ; None : pas
+    d'appel connu."""
+    context = context or TurnContext()
     parts = []
     if context.surface is not None:
         parts.append(_SURFACE_LINES[context.surface])
@@ -161,13 +294,14 @@ def render_context(context: TurnContext, placed_call: Optional[str] = None) -> O
             )
         )
     if context.language is not None:
-        # La langue de la voix choisie dans l'app : Sheldon écoute et lit dans cette langue (mots de
-        # Léo, 2026-10-02 : « quand je choisis français, que ça change en français »).
+        # La langue de la voix choisie dans l'app : Sheldon écoute et lit dans cette langue (demande
+        # du 2026-10-02 : « quand je choisis français, que ça change en français »).
         name = _LANGUAGE_NAMES.get(context.language.split("-")[0])
         parts.append(
             f"Reply in {name}: Sheldon listens to the user and reads your reply aloud in {name}." if name
             else f'Reply in the language "{context.language}": Sheldon listens to the user and reads your reply aloud in it.'
         )
+    parts.extend(list(notes)[:MAX_FEEDBACK_AND_UNDRAWN])
     if context.surface is not None:
         parts.append(_SPOKEN_RULES)
     return "[Sheldon] " + " ".join(parts) if parts else None

@@ -5,7 +5,7 @@ metadata["job_id"], et un texte enveloppé par Hermes (« Cronjob Response: <nom
 sauf cron.wrap_response: false). Hermes ne la recopie pas dans l'historique du chat
 (cron.mirror_delivery est coupé par défaut) : la carte du fil garde donc le texte
 entier. Chaque carte a sa propre conversation, « feed-<id> » : la page « Voir » de l'app,
-qui commence par ce texte et où Léo peut demander une suite à Hermes. Les actions de la
+qui commence par ce texte et où l'utilisateur peut demander une suite à Hermes. Les actions de la
 tâche se relisent dans sa session de state.db (appels d'outils, raisonnement) : c'est
 Hermes qui reste la source.
 """
@@ -14,12 +14,15 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .media import first_line
-from .sqlite import SqliteStore
+from .source import source_in_text
+from .sqlite import SqliteStore, ensure_columns
 from .timeutil import iso_utc
 
 _CRON_HEADER = re.compile(r"\ACronjob Response: (?P<name>[^\n]*)\n\(job_id: (?P<job>[^)\n]*)\)\n-+\n\n?")
@@ -56,6 +59,9 @@ class FeedItem:
     created_at: float
     seq: int
     file_ids: List[str] = field(default_factory=list)
+    # La provenance de ce que l'agent a fait : le premier bloc `source` de sa réponse
+    # (source.source_in_text), montrée sur la carte et en haut de « Voir ».
+    source: Optional[Dict[str, Any]] = None
 
     @property
     def thread_id(self) -> str:
@@ -72,10 +78,11 @@ class FeedItem:
             "summary": self.summary,
             "createdAt": iso_utc(self.created_at),
             "jobId": self.job_id,
+            "source": dict(self.source) if self.source else None,
         }
 
 
-_COLUMNS = "seq, id, kind, conversation_id, agent_id, title, summary, text, job_id, session_id, created_at, files"
+_COLUMNS = "seq, id, kind, conversation_id, agent_id, title, summary, text, job_id, session_id, created_at, files, source"
 
 
 def _item(row: Optional[sqlite3.Row]) -> Optional[FeedItem]:
@@ -84,6 +91,7 @@ def _item(row: Optional[sqlite3.Row]) -> Optional[FeedItem]:
     return FeedItem(
         row["id"], row["kind"], row["conversation_id"], row["agent_id"], row["title"], row["summary"],
         row["text"], row["job_id"], row["session_id"], row["created_at"], row["seq"], json.loads(row["files"]),
+        json.loads(row["source"]) if row["source"] else None,
     )
 
 
@@ -101,9 +109,16 @@ CREATE TABLE IF NOT EXISTS feed_items (
     job_id TEXT,
     session_id TEXT,
     created_at REAL NOT NULL,
-    files TEXT NOT NULL DEFAULT '[]'
+    files TEXT NOT NULL DEFAULT '[]',
+    source TEXT
 );
 """
+
+    def __init__(self, path: Path, clock: Callable[[], float] = time.time) -> None:
+        super().__init__(path, clock)
+        # Une base d'avant la provenance a déjà sa table, sans cette colonne : CREATE TABLE IF NOT
+        # EXISTS ne la touche pas.
+        ensure_columns(self._conn, "feed_items", {"source": "TEXT"})
 
     def add(
         self,
@@ -118,12 +133,14 @@ CREATE TABLE IF NOT EXISTS feed_items (
         file_ids: Sequence[str] = (),
     ) -> FeedItem:
         item_id = f"f-{uuid.uuid4().hex}"
+        # D'où vient ce que l'agent a fait : le premier bloc `source` de sa réponse, s'il y en a un.
+        source = source_in_text(text)
         with self._lock:
             self._conn.execute(
                 "INSERT INTO feed_items (id, kind, conversation_id, agent_id, title, summary, text, job_id, "
-                "session_id, created_at, files) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "session_id, created_at, files, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (item_id, kind, conversation_id, agent_id, title, first_line(text), text, job_id, session_id,
-                 self._clock(), json.dumps(list(file_ids))),
+                 self._clock(), json.dumps(list(file_ids)), json.dumps(source, ensure_ascii=False) if source else None),
             )
         item = self.get(item_id)
         assert item is not None

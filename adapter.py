@@ -302,6 +302,19 @@ def tool_context() -> ToolContext:
     )
 
 
+def cron_job(job_id: str) -> Optional[Dict[str, Any]]:
+    """L'enregistrement d'une tâche planifiée (cron/jobs.py:2007, get_job), pour la section de
+    prompt des tâches qui livrent à Sheldon (core/scheduled.py). None sur toute erreur : la
+    section se tait plutôt que de deviner."""
+    try:
+        from cron.jobs import get_job
+
+        job = get_job(job_id)
+    except Exception:
+        return None
+    return dict(job) if isinstance(job, dict) else None
+
+
 def file_base_dir(task_id: str) -> Optional[str]:
     """Le dossier contre lequel Hermes résout un chemin relatif d'un outil de fichiers : celui
     que le terminal de la session a enregistré (tools/file_tools.py, _resolve_base_dir), ou à
@@ -755,7 +768,7 @@ class SheldonAdapter(BasePlatformAdapter):
             # Mode multiplex : ce message va à un autre profil d'Hermes (gateway/run.py,
             # _resolve_profile_home_for_source).
             source.profile = route.profile
-        # Décision P6-10 : le salut du décroché (callId), celui de Léo ou « Allô ? » que l'app dit seule
+        # Décision P6-10 : le salut du décroché (callId), celui de l'utilisateur ou « Allô ? » que l'app dit seule
         # sans raison lisible, ne coupe pas Hermes quand une commande de cette conversation attend son
         # accord (la coupure la refuserait) : il part comme un texte, fondu dans le tour, et la commande
         # attend toujours sa carte. Seule une phrase qui dit quelque chose la refuse (P6-2). Étendue :
@@ -774,7 +787,7 @@ class SheldonAdapter(BasePlatformAdapter):
             user_name="Owner",
             timestamp=datetime.now(),
             # Rien de ce qui est dit iPhone verrouillé n'agit sur le gateway d'Hermes : ni commande, ni
-            # réponse à une question clarify en attente (décision P4-11). Pas plus ce que Léo n'a pas
+            # réponse à une question clarify en attente (décision P4-11). Pas plus ce que l'utilisateur n'a pas
             # écrit tel quel : la réponse à une proposition, écrite par Sheldon, et le premier message
             # d'un appel décroché (callId), « Allô ? » que l'app dit seule sans raison lisible (revue
             # finale du plan 6, I2). Un texte simple perd aussi ce droit au gestionnaire « occupé »
@@ -803,7 +816,7 @@ class SheldonAdapter(BasePlatformAdapter):
 
     def _refuse_from_the_app(self, conversation_id: str) -> None:
         """La phrase qui renvoie au terminal, dans la langue du chat (ses derniers messages), après
-        l'écho du message de Léo, que le pont publie au retour de _dispatch_user_message."""
+        l'écho du message de l'utilisateur, que le pont publie au retour de _dispatch_user_message."""
         texts = TEXTS[chat_language(TURN_CONTEXTS.texts(conversation_id), language())]
         bridge = self._runtime.bridge
         asyncio.get_running_loop().call_soon(bridge.assistant_sent, texts["command_from_terminal"], conversation_id)

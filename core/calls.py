@@ -1,6 +1,6 @@
 """« Hermes t'appelle » : l'outil sheldon_call, ses garde-fous et le registre des appels.
 
-Hermes appelle Léo quand Léo le lui a demandé (« appelle-moi quand tu as fini »), ou quand
+Hermes appelle l'utilisateur quand il le lui a demandé (« appelle-moi quand tu as fini »), ou quand
 un élément est vraiment important et urgent. L'iPhone sonne par un push VoIP (PushKit, puis
 CallKit dans l'app) ; les autres appareils reçoivent une alerte. Les garde-fous sont tenus
 ici, jamais par l'agent : appels coupés dans l'app (callsAllowed), heures calmes de chaque
@@ -21,7 +21,7 @@ Ronde de sécurité (task-17-findings-r1.md) :
 - au relais, le gateway refait callsAllowed et les heures calmes à l'heure du relais, et un
   appel de plus de CALL_RING_WINDOW_SECONDS ne sonne jamais (statut « missed ») ;
 - au plus MAX_REQUESTED_PER_QUIET_PERIOD appels demandés par période calme d'un appareil ;
-- requested n'est cru que dans un tour ouvert par un message de Léo (runtime.place_call).
+- requested n'est cru que dans un tour ouvert par un message de l'utilisateur (runtime.place_call).
 """
 from __future__ import annotations
 
@@ -350,7 +350,7 @@ CREATE TABLE IF NOT EXISTS calls (
         return row["n"] if row is not None else 0
 
     def last_unrequested_at(self) -> Optional[float]:
-        """L'heure du dernier appel que Léo n'avait pas demandé, s'il y en a un."""
+        """L'heure du dernier appel que l'utilisateur n'avait pas demandé, s'il y en a un."""
         with self._lock:
             return self._last_unrequested_at()
 

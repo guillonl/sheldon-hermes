@@ -67,7 +67,7 @@ def _open_store() -> DeviceStore:
 
 
 def _pair() -> int:
-    # Seul Léo, dans un vrai terminal et hors du gateway (par SSH), reçoit un code par la
+    # Seul l'utilisateur, dans un vrai terminal et hors du gateway (par SSH), reçoit un code par la
     # commande. L'outil terminal d'Hermes peut donner un pseudo-terminal (pty=true), où isatty
     # vaut vrai ; mais le gateway pose _HERMES_GATEWAY=1 (gateway/run.py), que tous ses
     # descendants héritent (tâche 16, rondes 1 et 2).

@@ -59,7 +59,7 @@ def _end_state_for_superseded(request_id: str, others: int) -> Dict[str, Any]:
     demande n'est pas forcément close (elle peut rester en attente dans l'onglet Demandes),
     mais plan_live est pur et ne relit jamais son contenu d'origine. `expired` est la valeur
     la plus proche des trois permises par le statut (pending/answered/expired) pour une
-    Activité qui s'efface sans réponse de Léo ; ni sender ni title n'ont plus d'importance une
+    Activité qui s'efface sans réponse de l'utilisateur ; ni sender ni title n'ont plus d'importance une
     fois l'événement `end` reçu (dismissal-date passée, F4)."""
     return {
         "requestId": request_id, "sender": None, "title": None, "category": None,

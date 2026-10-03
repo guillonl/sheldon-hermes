@@ -31,6 +31,7 @@ Si `sheldon_pair` refuse, répète son refus : il dit ce qui manque (Tailscale, 
 
 - Rappelle une fois à l'utilisateur de désactiver l'expiration de la clé de cet ordinateur dans la console de Tailscale (Machines, cet ordinateur, Disable key expiry) : sinon la connexion s'arrête au bout de 180 jours.
 - Après l'installation, le plugin te refuse toute commande qui touche à la sécurité de Sheldon (`hermes sheldon ...`, sa base, son port, ses clés) : l'utilisateur les lance lui-même dans un terminal.
+- Le plugin te refuse aussi d'écrire dans son propre dossier : garde ce que tu apprends dans le profil de l'utilisateur ou dans tes propres skills. Cette garde lit le texte des commandes : elle protège contre les erreurs et les manipulations naïves, ce n'est pas une frontière de sécurité. Conseille une fois à l'utilisateur de te faire tourner sous un compte macOS séparé, avec un dossier du plugin qui ne t'appartient pas, pour qu'il soit vraiment en lecture seule.
 
 ---
 
@@ -67,3 +68,4 @@ If `sheldon_pair` refuses, repeat its refusal: it says what is missing (Tailscal
 
 - Remind the user once to disable key expiry for this computer in the Tailscale admin console (Machines, this computer, Disable key expiry): otherwise the connection stops after 180 days.
 - After the install, the plugin refuses you every command that touches Sheldon's security (`hermes sheldon ...`, its database, its port, its keys): the user runs them in a terminal.
+- The plugin also refuses you any write into its own folder: keep what you learn in the user's profile or in your own skills. This guard reads the text of commands: it protects against mistakes and naive manipulation, it is not a security boundary. Advise the user once to run you under a separate macOS account, with a plugin folder you do not own, so it is truly read-only.

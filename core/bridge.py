@@ -106,7 +106,7 @@ class SheldonBridge:
         context: Optional[TurnContext] = None,
         gateway_control: bool = True,
     ) -> None:
-        """gateway_control : False pour un message que Léo n'a pas écrit tel quel (la réponse à une
+        """gateway_control : False pour un message que l'utilisateur n'a pas écrit tel quel (la réponse à une
         proposition, écrite par Sheldon) ; il ne répond alors à aucune question clarify en attente
         et ne lance aucune commande (revue finale du plan 6, I2)."""
         if self._closed:
@@ -188,7 +188,7 @@ class SheldonBridge:
         # connaît Hermes à la fin, gateway/platforms/base.py, on_processing_complete).
         turn_message = self._turn_messages.pop(conversation_id, None) or message_id
         self._turn_taken.pop(conversation_id, None)
-        # Chez Léo le streaming général est coupé, donc une réponse part souvent par un
+        # Quand le streaming général est coupé, une réponse part souvent par un
         # seul `send` (jamais suivi d'un edit_message(finalize=True)) : sans ceci, aucun
         # message ne serait jamais marqué final sur ces tours-là. On republie donc, dans
         # l'ordre d'envoi, chaque message encore ouvert de cette conversation avec son

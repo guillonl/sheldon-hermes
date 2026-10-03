@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import List
 
 DEFAULT_LOCAL_PORT = 8787
 DEFAULT_PUBLIC_PORT = 8443
@@ -30,6 +31,17 @@ def hermes_home() -> Path:
     (voir core/files.py) : cette vérification a besoin de la racine, pas de data_dir().
     """
     return _hermes_home()
+
+
+def plugin_dirs() -> List[Path]:
+    """Les dossiers du plugin que la garde ferme en écriture (spec 3.3) : le paquet lui-même,
+    chemin réel (un lien de développement compris), et son dossier d'installation sous
+    HERMES_HOME (hermes_cli/plugins_cmd.py:148-150), sans doublon."""
+    found: List[Path] = []
+    for folder in (Path(__file__).resolve().parents[1], _hermes_home() / "plugins" / "sheldon"):
+        if folder not in found:
+            found.append(folder)
+    return found
 
 
 def db_path() -> Path:
