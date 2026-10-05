@@ -114,7 +114,7 @@ A type named here but not listed under Blocks below is not drawn yet: use `objec
   `2026-09-26T20:00+02:00`. Times alone: `09:30`, `9h30`, `14h`.
 - `title`, `subtitle` (the context: "Épisode 42 · 7 derniers jours") and `footer` (the source) frame
   almost every block.
-- Write in the user's language; in French, apply a non-breaking space before `:`, `?`, `!`, `%` and
+- Write in the user's language; in French, apply a non-breaking space before `:`, `?`, `%`, `!` and
   units, and inside « », and the typographic apostrophe `’` (`l’épisode`, `C’est fait`), never `'`
   outside code.
 - A button without a link sends the user's answer back to you as an ordinary message,
