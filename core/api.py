@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 from aiohttp import web
 
+from . import bots
 from .bridge import INPUT_MODES, SheldonBridge
 from .calls import parse_quiet_hours
 from .conversations import Conversation, ConversationCatalog
@@ -564,6 +565,23 @@ async def _clear_live_activity(request: web.Request) -> web.Response:
     return web.Response(status=204)
 
 
+async def _agent_avatar(request: web.Request) -> web.Response:
+    """Le visage Bot Mode d'un agent (spec 12), lu sur la machine d'Hermes : jamais celui du
+    principal (le nuage), jamais un fichier trop gros ou qui n'est pas une image. Le type vient de
+    ses premiers octets, jamais de son nom ; l'app relit le visage quand sa date change."""
+    agent_id = request.match_info["agent_id"]
+    agent = next((a for a in request.app[CTX].services.catalog.agents() if a.id == agent_id), None)
+    if agent is None or agent.is_default:
+        raise ApiError(404, "avatar_not_found")
+    found = await asyncio.to_thread(bots.read_avatar, agent.home)
+    if found is None:
+        raise ApiError(404, "avatar_not_found")
+    data, kind = found
+    return web.Response(body=data, headers={
+        "Content-Type": kind, "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff",
+    })
+
+
 async def _list_requests(request: web.Request) -> web.Response:
     requests = request.app[CTX].services.requests
     limit = _int_param(request, "decidedLimit", DEFAULT_DECIDED, 1, MAX_DECIDED)
@@ -758,6 +776,7 @@ def create_app(
     app.router.add_get("/v1/conversations/{conversation_id}/messages", _list_messages)
     app.router.add_post("/v1/conversations/{conversation_id}/messages", _send_message)
     app.router.add_get("/v1/agents", _list_agents)
+    app.router.add_get("/v1/agents/{agent_id}/avatar", _agent_avatar)
     app.router.add_get("/v1/requests", _list_requests)
     app.router.add_get("/v1/requests/{request_id}", _get_request)
     app.router.add_post("/v1/requests/{request_id}/answer", _answer_request)

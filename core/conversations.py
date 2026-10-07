@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .errors import SheldonError
 from .sqlite import SqliteStore
 from .text import clean_line
+from .timeutil import iso_utc
 
 MAIN_ID = "main"
 MAIN_CHAT_ID = "owner"
@@ -39,16 +40,27 @@ class Agent:
     is_default: bool = False
     # Dossier du profil (sa state.db), None s'il est inconnu.
     home: Optional[Path] = None
+    # La date de son visage Bot Mode (assets/avatar.*, core/bots.py), None sans visage. Jamais pour
+    # le principal, dont le visage est le nuage.
+    avatar_updated_at: Optional[float] = None
+    # Son profil est géré par Bot Mode (tools/bot_mode_probe.py, _is_bot_managed).
+    bot_managed: bool = False
+    # Son chat de Sheldon suit la session « Bot Chat » du bot (core/bots.py, BotChatLinks).
+    bot_chat: bool = False
 
     def to_json(self, conversation_id: str) -> Dict[str, Any]:
-        return {
+        payload: Dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "description": self.description,
             "model": self.model,
             "isDefault": self.is_default,
             "conversationId": conversation_id,
+            "botChat": self.bot_chat and not self.is_default,
         }
+        if self.avatar_updated_at is not None and not self.is_default:
+            payload["avatar"] = {"url": f"/v1/agents/{self.id}/avatar", "updatedAt": iso_utc(self.avatar_updated_at)}
+        return payload
 
 
 FALLBACK_AGENT = Agent("default", "Hermes", is_default=True)

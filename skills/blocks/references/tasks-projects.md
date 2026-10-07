@@ -2,7 +2,7 @@
 
 # Tasks, projects and diagrams
 
-Load this sheet before your first task, activity, todo, diff, status or diagram block in a conversation; each block gives its fields (required ones in bold, other accepted names in parentheses), its preview, its full view on a tap, its buttons and two examples, French then English. Only `activity` and `todo` have buttons.
+Load this sheet before your first task, activity, todo, board, standup, diff, status or diagram block in a conversation; each block gives its fields (required ones in bold, other accepted names in parentheses), its preview, its full view on a tap, its buttons and two examples, French then English. Only `activity` and `todo` have buttons.
 
 ### `task`
 
@@ -43,7 +43,7 @@ the work yourself.
 Examples:
 
 ```sheldon
-{"type": "activity", "title": "Tri du matin", "summary": "4 actions · 1 erreur", "cost": "0,04 $", "undo": "Tout restaurer", "items": [{"label": "Archivé « Figma Weekly »", "tool": "Mail", "time": "07:02", "state": "done"}, {"label": "Brouillon pour Camille Roy", "tool": "Mail", "time": "07:03", "state": "done", "detail": "Réponse à l’invitation de jeudi, rien n’est envoyé."}, {"label": "Page du fournisseur", "tool": "Navigateur", "time": "07:04", "state": "failed", "detail": "Délai dépassé", "url": "https://exemple.com/factures"}, {"label": "Facture rangée", "tool": "Fichiers", "target": "Factures 2026", "state": "skipped", "detail": "Déjà dans le dossier."}]}
+{"type": "activity", "title": "Tri du matin", "summary": "4 actions · 1 erreur", "cost": "0,04 $", "undo": "Tout restaurer", "items": [{"label": "Archivé « Figma Weekly »", "tool": "Mail", "time": "07:02", "state": "done"}, {"label": "Brouillon pour Camille Roy", "tool": "Mail", "time": "07:03", "state": "done", "detail": "Réponse à l’invitation de jeudi, rien n’est envoyé."}, {"label": "Page du fournisseur", "tool": "Navigateur", "time": "07:04", "state": "failed", "detail": "Délai dépassé", "url": "https://example.com/factures"}, {"label": "Facture rangée", "tool": "Fichiers", "target": "Factures 2026", "state": "skipped", "detail": "Déjà dans le dossier."}]}
 ```
 
 ```sheldon
@@ -73,6 +73,54 @@ Examples:
 
 ```sheldon
 {"type": "todo", "title": "Lisbon packing list", "items": [{"title": "Passports", "done": true}, {"title": "Plug adapter"}, {"title": "Sunscreen"}, {"title": "Chargers"}, {"title": "Book the airport transfer", "due": "Friday", "note": "Camille Roy can drop us off on the way out."}]}
+```
+
+### `board`
+
+A compact Kanban: the work of several agents (or topic chats) on one project, in columns. Use `task`
+for the steps of one job, `todo` for a list the user ticks off.
+
+Fields: **`columns`** (`[{title, cards}]`, 5 at most), `title`; a card is `{title, agent?, blocked?,
+due?}` or a title, 20 at most per column; `agent` names the agent or the topic chat that carries it.
+
+Preview: each column with its count, then the blocked cards, three at most, in orange, then how many
+more are blocked. Full view: every column, its cards grouped by agent, with their due date.
+
+Buttons: none. To unblock a card, ask in your reply, or use `sheldon_propose` for a decision that can
+wait.
+
+Examples:
+
+```sheldon
+{"type": "board", "title": "Épisode 44", "columns": [{"title": "À faire", "cards": [{"title": "Miniature", "agent": "design"}, {"title": "Annonce Instagram", "agent": "podcast"}]}, {"title": "En cours", "cards": [{"title": "Montage", "agent": "podcast"}, {"title": "Mixage", "agent": "podcast", "blocked": true}, {"title": "Devis du studio de Sam Tremblay", "agent": "mail", "blocked": true, "due": "jeudi"}]}, {"title": "Fait", "cards": [{"title": "Enregistrement", "agent": "podcast"}, {"title": "Invitation de Camille Roy", "agent": "mail"}]}]}
+```
+
+```sheldon
+{"type": "board", "title": "Episode 44", "columns": [{"title": "To do", "cards": [{"title": "Thumbnail", "agent": "design"}, {"title": "Instagram post", "agent": "podcast"}]}, {"title": "In progress", "cards": [{"title": "Editing", "agent": "podcast"}, {"title": "Mixing", "agent": "podcast", "blocked": true}, {"title": "Quote from Sam Tremblay’s studio", "agent": "mail", "blocked": true, "due": "Thursday"}]}, {"title": "Done", "cards": [{"title": "Recording", "agent": "podcast"}, {"title": "Invitation to Camille Roy", "agent": "mail"}]}]}
+```
+
+### `standup`
+
+The point of the day across agents: what is done, what is in progress, what is blocked. Use `board`
+for the columns of one project, `activity` for what one task did.
+
+Fields: **`done`**, **`doing`** and **`blocked`** (`[{text, agent?}]`, or texts; 10 at most each; at
+least one line in all), `title`, `date`; `agent` names the agent or the topic chat of the line.
+
+Preview: the three counts, then the first blocked line, in orange, and how many more are blocked.
+Full view: the date, then each part with its lines grouped by agent.
+
+Buttons: none. To unblock a line, ask in your reply, or use `sheldon_propose` for a decision that can
+wait.
+
+Examples:
+
+```sheldon
+{"type": "standup", "title": "Ce matin", "date": "lundi 5 oct.", "done": [{"text": "Tri des mails", "agent": "mail"}, {"text": "Résumé de la veille design", "agent": "veille"}, {"text": "Réponse à Camille Roy", "agent": "mail"}], "doing": [{"text": "Montage de l’épisode 44", "agent": "podcast"}], "blocked": [{"text": "Devis du studio de Sam Tremblay", "agent": "mail"}]}
+```
+
+```sheldon
+{"type": "standup", "title": "This morning", "date": "Monday, Oct 5", "done": [{"text": "Sorted the mail", "agent": "mail"}, {"text": "Design watch summary", "agent": "veille"}, {"text": "Reply to Camille Roy", "agent": "mail"}], "doing": [{"text": "Editing episode 44", "agent": "podcast"}], "blocked": [{"text": "Quote from Sam Tremblay’s studio", "agent": "mail"}]}
 ```
 
 ### `diff`

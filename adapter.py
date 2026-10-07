@@ -10,19 +10,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
+import importlib
 import logging
+import math
 import re
 import threading
 import time
 from datetime import datetime
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from gateway.config import Platform
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 
-from .core import hostname, media, pair_link, paths, tailscale, welcome
+from .core import bots, hostname, media, pair_link, paths, tailscale, welcome
 from .core.api import create_app
 from .core.bridge import DEFAULT_CURSOR, configured_cursor
 from .core.commands import command_parts, command_text, permitted
@@ -30,7 +33,7 @@ from .core.conversations import Agent
 from .core.files import FileError
 from .core.history import MessageLoader
 from .core.messages import TEXTS, chat_language, language
-from .core.pair_link import check_serve, extension_listening
+from .core.pair_link import GuardedPlaces, check_serve, extension_listening, guarded_places
 from .core.pairing import PairingService
 from .core.push import PushService
 from .core.runtime import Runtime, ToolContext
@@ -47,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 OWNER_USER_ID = "owner"
 # La version d'Hermes dont le code a été lu pour les gardes de ce fichier (voir _unsupported_hermes).
-VERIFIED_HERMES = "0.20.4"
+VERIFIED_HERMES = "0.21.4"
 LOCK_SCOPE = "sheldon"
 AGENTS_TTL = 30.0
 DEFAULT_APPROVAL_TIMEOUT = 300
@@ -73,7 +76,7 @@ class HermesLink:
     """Le port vers Hermes (voir HermesPort dans core/runtime.py). Chaque appel est protégé :
     une fonction d'Hermes qui change de place ne doit pas faire tomber l'extension.
 
-    Fil d'exécution (vérifié dans Hermes 0.20.4, gateway/run.py) : send_clarify et
+    Fil d'exécution (vérifié dans Hermes 0.20.4, gateway/run.py ; en 0.21, gateway/run_turn_runner.py) : send_clarify et
     send_exec_approval sont tous deux déclenchés depuis le thread de l'agent (le rappel
     synchrone d'un outil bloquant), mais toujours via safe_schedule_threadsafe(coroutine,
     ctx._loop_for_step) avant d'être attendus avec fut.result(timeout=15) : la coroutine de
@@ -91,21 +94,32 @@ class HermesLink:
         self._agents: Optional[Tuple[float, List[Agent]]] = None
         self._multiplex: Optional[bool] = None
         self._redact_warned = False
+        # Revue finale 47, I2 : pendant le tour d'un agent secondaire, Hermes pose le HERMES_HOME de ce
+        # profil (gateway/run.py, _profile_runtime_scope), et get_active_profile_name le suit. Dans le
+        # gateway, le principal et son dossier sont donc lus ici, au connect(), hors de tout tour ; hors
+        # du gateway (commande, outil), à chaque appel, comme avant.
+        self._main: Optional[str] = None
+        self._main_home: Optional[Path] = None
+        # I3 : les lieux de Sheldon (~/.hermes/sheldon, les dossiers du plugin, le port), figés ici pour
+        # la garde des autres profils, jamais relus dans leurs tours. None hors du gateway.
+        self._places: Optional[GuardedPlaces] = None
+        self._unguarded: Set[str] = set()
+        if gateway_runner is not None:
+            self._main = _active_profile_name()
+            with contextlib.suppress(Exception):
+                self._main_home = paths.hermes_home()
+            self._places = guarded_places()
 
     def multiplex(self) -> bool:
         if self._runner is not None:
             return bool(getattr(getattr(self._runner, "config", None), "multiplex_profiles", False))
         if self._multiplex is None:
-            # Hors du gateway (outil de l'agent, commande, envoi sans gateway) : la config d'Hermes
-            # le dit, pour que « sheldon:agent-<profil> », sheldon_propose et « chats add --agent »
-            # voient les mêmes agents que le gateway.
-            try:
-                from gateway.config import load_gateway_config
-
-                self._multiplex = bool(getattr(load_gateway_config(), "multiplex_profiles", False))
-            except Exception:
-                logger.warning("Sheldon: Hermes gateway config unavailable, multiplex considered off", exc_info=True)
-                self._multiplex = False
+            # Hors du gateway (outil de l'agent, commande, envoi sans gateway) : la même réponse que
+            # le gateway, pour que « sheldon:agent-<profil> », sheldon_propose et « chats add --agent »
+            # voient les mêmes agents que lui.
+            self._multiplex = _hermes_multiplex()
+            if self._multiplex is None:
+                self._multiplex = _configured_multiplex()
         return self._multiplex
 
     def agents(self) -> List[Agent]:
@@ -116,7 +130,8 @@ class HermesLink:
         try:
             from hermes_cli.profiles import get_active_profile_name, list_profiles
 
-            current = get_active_profile_name() or "default"
+            current = self._main or get_active_profile_name() or "default"
+            is_bot_managed = _bot_mode_probe()
             agents = [
                 Agent(
                     id=_bounded_agent_id(profile.name),
@@ -125,6 +140,9 @@ class HermesLink:
                     model=profile.model,
                     is_default=profile.name == current,
                     home=Path(profile.path),
+                    # Le visage Bot Mode du profil (tâche 43) ; le principal garde le nuage.
+                    avatar_updated_at=None if profile.name == current else bots.avatar_updated_at(Path(profile.path)),
+                    bot_managed=is_bot_managed(Path(profile.path)),
                 )
                 for profile in list_profiles()
             ]
@@ -142,8 +160,142 @@ class HermesLink:
         self._agents = (now, agents)
         return list(agents)
 
+    def guard_profiles(self, agents: List[Agent]) -> None:
+        """Revue finale 47, I3. Hermes 0.21 garde un gestionnaire d'extensions par dossier de profil
+        (hermes_cli/plugins.py, get_plugin_manager), et le tour d'un profil passe par le sien
+        (invoke_hook, garde pre_tool_call comprise). Le plugin n'est activé que sur le profil par
+        défaut (INSTALL-HERMES.md) : sa garde et son contexte de tour sont donc posés ici dans le
+        gestionnaire de chaque autre profil servi, la garde avec les lieux figés au démarrage.
+        Hors du gateway, rien. Une erreur sur un profil ne touche pas les autres."""
+        if self._places is None:
+            return
+        hooks = _profile_hooks(self._places)
+        for agent in agents:
+            if agent.is_default or agent.home is None:
+                continue
+            try:
+                _install_hooks(Path(agent.home), hooks)
+            except Exception:
+                if agent.id not in self._unguarded:
+                    logger.warning("Sheldon: guard not installed in the Hermes profile %s", agent.id, exc_info=True)
+                self._unguarded.add(agent.id)
+            else:
+                self._unguarded.discard(agent.id)
+
     def gateway_state_db(self) -> Path:
         return paths.hermes_state_db()
+
+    def bot_chat_session(self, agent: Agent) -> Optional[str]:
+        """La session « Bot Chat » de ce profil (Bot Mode, Hermes 0.21), lue dans sa propre base :
+        le titre exact (hermes_state_titles.py, get_session_by_title), gardé seulement si la session
+        est cachée, comme Hermes reconnaît le « Bot Chat » canonique (revue finale 47, M1). Jamais
+        un « Bot Chat #2 », ni une session visible nommée « Bot Chat » par /title. None sans base,
+        sans cette session, ou sur toute erreur."""
+        db = Path(agent.home) / "state.db" if agent.home is not None else None
+        if db is None or not db.is_file():
+            return None
+        try:
+            from hermes_state import SessionDB
+
+            session_db = SessionDB(db_path=db, read_only=True)
+        except Exception:
+            logger.warning("Sheldon: Hermes sessions of %s unavailable", agent.id, exc_info=True)
+            return None
+        try:
+            session = session_db.get_session_by_title(bots.BOT_CHAT_TITLE)
+        except Exception:
+            logger.warning("Sheldon: Bot Chat of %s unreadable", agent.id, exc_info=True)
+            return None
+        finally:
+            with contextlib.suppress(Exception):
+                session_db.close()
+        session_id = session.get("id") if isinstance(session, dict) and session.get("hidden") else None
+        return session_id if isinstance(session_id, str) and session_id else None
+
+    def job_workdir(self, job_id: str) -> Optional[str]:
+        """Le dossier de travail d'une tâche planifiée (cron/jobs.py, get_job : workdir), ou None."""
+        job = cron_job(job_id)
+        workdir = job.get("workdir") if job else None
+        return workdir if isinstance(workdir, str) and workdir.strip() else None
+
+    def project_for(self, profile: Optional[str], path: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Le projet d'Hermes qui contient ce dossier (hermes_cli/projects_db.py, project_for_path : le
+        plus long dossier l'emporte), dans la base de ce profil ($HERMES_HOME/projects.db). La base
+        s'ouvre en lecture seule, jamais par projects_db.connect, qui la créerait et la migrerait.
+        None sans base, sans projet, ou sur toute erreur."""
+        if not path:
+            return None
+        home = self._profile_home(profile)
+        db = home / "projects.db" if home is not None else None
+        if db is None or not db.is_file():
+            return None
+        try:
+            import sqlite3
+
+            from hermes_cli.projects_db import project_for_path
+
+            with contextlib.closing(sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)) as conn:
+                conn.row_factory = sqlite3.Row
+                project = project_for_path(conn, path)
+        except Exception:
+            logger.warning("Sheldon: Hermes projects of %s unavailable", profile or "default", exc_info=True)
+            return None
+        if project is None:
+            return None
+        return {key: getattr(project, key, None) for key in ("slug", "name", "icon", "color")}
+
+    def _profile_home(self, profile: Optional[str]) -> Optional[Path]:
+        """Le dossier du profil de cet agent ; celui du gateway pour l'agent principal."""
+        agent = next((agent for agent in self.agents() if agent.id == profile), None) if profile else None
+        if agent is not None and agent.home is not None and not agent.is_default:
+            return Path(agent.home)
+        if self._main_home is not None:
+            return self._main_home
+        try:
+            return paths.hermes_home()
+        except Exception:
+            return None
+
+    def link_session(self, session_key: str, session_id: str) -> bool:
+        """Fait pointer la clé de session d'un chat de Sheldon vers une session existante, comme
+        /resume (gateway/session.py, SessionStore.switch_session), puis oublie l'agent gardé en
+        mémoire pour cette clé (gateway/run_agent_cache.py, _evict_cached_agent), qui écrirait sinon
+        dans l'ancienne session, et vide son état d'approbation (tools/approval.py, clear_session) :
+        un « Autoriser pour la session » d'avant la bascule ne vaut plus après, comme à la frontière
+        de /resume (revue finale 47, M1). switch_session refuse une clé que le gateway ne connaît pas
+        encore (un chat jamais ouvert). False sur un refus ou une erreur : le chat d'aujourd'hui."""
+        store = getattr(self._runner, "session_store", None)
+        if store is None:
+            return False
+        try:
+            entry = store.switch_session(session_key, session_id)
+        except Exception:
+            logger.warning("Sheldon: Hermes refused to point %s at %s", session_key, session_id, exc_info=True)
+            return False
+        if entry is None:
+            return False
+        evict = getattr(self._runner, "_evict_cached_agent", None)
+        if callable(evict):
+            with contextlib.suppress(Exception):
+                evict(session_key)
+        try:
+            from tools.approval import clear_session
+
+            clear_session(session_key)
+        except Exception:
+            logger.warning("Sheldon: approvals of %s not cleared after the Bot Chat link", session_key, exc_info=True)
+        return True
+
+    def session_of(self, session_key: str) -> Optional[str]:
+        """La session que vise la clé d'un chat dans le gateway (gateway/session.py,
+        SessionStore.peek_session_id) : un /new la change (revue finale 47, M3). None pour une clé
+        inconnue, hors du gateway, ou sur toute erreur."""
+        store = getattr(self._runner, "session_store", None)
+        try:
+            session_id = store.peek_session_id(session_key) if store is not None else None
+        except Exception:
+            return None
+        return session_id if isinstance(session_id, str) and session_id else None
 
     @contextlib.contextmanager
     def open_session_messages(self, db: Path) -> Iterator[MessageLoader]:
@@ -227,6 +379,134 @@ class HermesLink:
 _LIVE: Dict[str, Any] = {}
 
 
+@functools.lru_cache(maxsize=None)
+def _profile_hooks(places: GuardedPlaces) -> Tuple[Tuple[str, Callable[..., Any]], ...]:
+    """Les crochets posés dans les autres profils : la garde aux lieux figés et le contexte de tour
+    (sheldon/__init__.py). Un seul jeu par lieux : une reconnexion du gateway les retrouve déjà posés."""
+    from . import _turn_context, frozen_guard
+
+    return (("pre_tool_call", frozen_guard(places)), ("pre_llm_call", _turn_context))
+
+
+def _install_hooks(home: Path, hooks: Sequence[Tuple[str, Callable[..., Any]]]) -> None:
+    """Ajoute ces crochets au gestionnaire d'extensions du profil de ce dossier, s'ils n'y sont pas.
+    Comme Hermes pour les crochets de config.yaml (agent/shell_hooks.py, register_from_config :
+    manager._hooks.setdefault(event, []).append(callback)), lu sous le HERMES_HOME du profil
+    (set_hermes_home_override), la clé du gestionnaire. Puis les y garde après une relecture forcée
+    des extensions (_keep_after_forced_reload)."""
+    from hermes_cli.plugins import get_plugin_manager
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(home))
+    try:
+        manager = get_plugin_manager()
+    finally:
+        reset_hermes_home_override(token)
+    _add_hooks(manager, hooks)
+    _keep_after_forced_reload(manager, hooks)
+
+
+def _add_hooks(manager: Any, hooks: Sequence[Tuple[str, Callable[..., Any]]]) -> None:
+    for name, callback in hooks:
+        callbacks = manager._hooks.setdefault(name, [])
+        if callback not in callbacks:
+            callbacks.append(callback)
+
+
+def _keep_after_forced_reload(manager: Any, hooks: Sequence[Tuple[str, Callable[..., Any]]]) -> None:
+    """Re-relecture 47, N1, et passe F1. Une découverte forcée des extensions d'un profil (le verbe
+    reload-plugins que demande « hermes -p <profil> plugins install|enable|update », ou un outil à qui
+    manque un fournisseur) vide son gestionnaire dès son début (unload, hermes_cli/plugins_ledger.py) :
+    la garde et la ligne [Sheldon] y manqueraient jusqu'à la relecture suivante des agents (30 s).
+    Hermes a eu ce défaut pour ses crochets de config.yaml (#60036) et les repose à la fin de chaque
+    découverte forcée, par _re_register_config_hooks_after_force (hermes_cli/plugins.py,
+    discover_and_load). Sheldon enveloppe les deux méthodes, une fois par gestionnaire : l'originale,
+    puis ses crochets, sans jamais lever. Reposer au retour d'unload ferme aussi la passe elle-même,
+    une passe qui lève et le mode sûr (HERMES_SAFE_MODE), qui sautent la repose de fin. Sur un Hermes
+    qui n'a pas une méthode, rien pour elle : la relecture des 30 s reste le filet."""
+    for name in ("unload", "_re_register_config_hooks_after_force"):
+        _restore_after(manager, name, hooks)
+
+
+def _restore_after(manager: Any, name: str, hooks: Sequence[Tuple[str, Callable[..., Any]]]) -> None:
+    """Enveloppe cette méthode du gestionnaire (appelée par self. dans Hermes, donc trouvée sur
+    l'instance) : l'originale, puis les crochets de la dernière pose, même si l'originale lève."""
+    found = getattr(manager, name, None)
+    if found is None:
+        return
+    if hasattr(found, "sheldon_hooks"):
+        found.sheldon_hooks = hooks
+        return
+
+    @functools.wraps(found)
+    def restore(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return found(*args, **kwargs)
+        finally:
+            try:
+                _add_hooks(manager, restore.sheldon_hooks)
+            except Exception:
+                logger.warning("Sheldon: guard not restored after a forced reload of Hermes extensions", exc_info=True)
+
+    restore.sheldon_hooks = hooks
+    setattr(manager, name, restore)
+
+
+def _active_profile_name() -> Optional[str]:
+    """Le profil du HERMES_HOME courant (hermes_cli/profiles.py, get_active_profile_name), « default »
+    sans nom ; None quand Hermes ne le dit pas : la lecture se refait alors à chaque appel."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+
+        return get_active_profile_name() or "default"
+    except Exception:
+        return None
+
+
+def _hermes_multiplex() -> Optional[bool]:
+    """Le multiplex tel que le voient les commandes d'Hermes 0.21 (hermes_cli/gateway_multiplex_mode.py,
+    default_gateway_multiplexes) : le registre du gateway vivant (served_profiles), sinon le choix écrit
+    dans la config du profil par défaut, sinon coupé. Depuis 0.21 le multiplex est le défaut, et
+    gateway.multiplex_profiles reste à None hors du gateway tant qu'il ne l'a pas tranché à son
+    démarrage (resolve_multiplex_mode). None quand la réponse est illisible : un Hermes sans ce module,
+    une fonction qui lève ou qui ne rend pas un booléen."""
+    try:
+        from hermes_cli.gateway_multiplex_mode import default_gateway_multiplexes
+
+        answer = default_gateway_multiplexes()
+    except Exception:
+        return None
+    return answer if isinstance(answer, bool) else None
+
+
+def _configured_multiplex() -> bool:
+    """gateway.multiplex_profiles de la config d'Hermes (0.20.4, et le repli en 0.21) ; coupé sans config."""
+    try:
+        from gateway.config import load_gateway_config
+
+        return bool(getattr(load_gateway_config(), "multiplex_profiles", False))
+    except Exception:
+        logger.warning("Sheldon: Hermes gateway config unavailable, multiplex considered off", exc_info=True)
+        return False
+
+
+def _bot_mode_probe() -> Callable[[Path], bool]:
+    """Le test de Bot Mode d'Hermes 0.21 sur un dossier de profil (tools/bot_mode_probe.py,
+    _is_bot_managed : profile.yaml porte ui_meta['hermes-bots']). Un Hermes sans Bot Mode : aucun."""
+    try:
+        from tools.bot_mode_probe import _is_bot_managed
+    except Exception:
+        return lambda _home: False
+
+    def managed(home: Path) -> bool:
+        try:
+            return bool(_is_bot_managed(home))
+        except Exception:
+            return False
+
+    return managed
+
+
 def _live_adapter() -> Optional["SheldonAdapter"]:
     return _LIVE.get("adapter")
 
@@ -270,7 +550,7 @@ def _canonical_command(name: str) -> Optional[str]:
 
 
 def _as_conversation(handler: Any) -> Any:
-    """Le gestionnaire du gateway pour un message reçu pendant un tour (gateway/run.py,
+    """Le gestionnaire du gateway pour un message reçu pendant un tour (gateway/run_busy.py,
     _handle_active_session_busy_message) valide une approbation en attente quand le texte entier
     vaut « yes », « ok », « always »..., si l'événement a le droit d'agir sur le gateway. Un texte
     de l'app qui n'est pas une commande lui arrive donc sans ce droit : il reste une phrase, mise
@@ -315,6 +595,22 @@ def cron_job(job_id: str) -> Optional[Dict[str, Any]]:
     return dict(job) if isinstance(job, dict) else None
 
 
+def workspace_root(task_id: Optional[str]) -> Optional[str]:
+    """Le dossier de travail de la session de cette tâche, pour son projet (spec 12) : son cwd
+    enregistré, celui que le desktop a posé, ou le terminal.cwd du profil
+    (tools/file_tools_paths.py, _authoritative_workspace_root). Jamais le dossier courant du
+    processus d'Hermes, qui n'est le dossier d'aucun projet. None sinon."""
+    if not task_id:
+        return None
+    try:
+        from tools.file_tools_paths import _authoritative_workspace_root
+
+        root = _authoritative_workspace_root(task_id)
+    except Exception:
+        return None
+    return str(root) if root else None
+
+
 def file_base_dir(task_id: str) -> Optional[str]:
     """Le dossier contre lequel Hermes résout un chemin relatif d'un outil de fichiers : celui
     que le terminal de la session a enregistré (tools/file_tools.py, _resolve_base_dir), ou à
@@ -334,12 +630,27 @@ def file_base_dir(task_id: str) -> Optional[str]:
 
 
 def _approval_timeout() -> int:
+    """approvals.timeout d'Hermes, l'échéance d'une carte d'approbation : lu dans
+    tools/approval_context.py (Hermes 0.21), sinon dans tools/approval.py (0.20.4). Fermé : un
+    import qui échoue, une fonction qui lève ou une valeur qui n'est pas un nombre positif donnent
+    DEFAULT_APPROVAL_TIMEOUT, le défaut d'Hermes."""
+    read = None
+    for name in ("tools.approval_context", "tools.approval"):
+        try:
+            read = getattr(importlib.import_module(name), "_get_approval_timeout", None)
+        except Exception:
+            read = None
+        if callable(read):
+            break
+    if not callable(read):
+        return DEFAULT_APPROVAL_TIMEOUT
     try:
-        from tools.approval import _get_approval_timeout
-
-        return int(_get_approval_timeout())
+        value = read()
     except Exception:
         return DEFAULT_APPROVAL_TIMEOUT
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or int(value) <= 0:
+        return DEFAULT_APPROVAL_TIMEOUT
+    return int(value)
 
 
 def _clarify_timeout() -> Optional[int]:
@@ -385,7 +696,7 @@ class SheldonAdapter(BasePlatformAdapter):
         self._welcome: Optional[asyncio.Task] = None
 
     # Là où le gateway range son gestionnaire des messages reçus pendant un tour
-    # (set_busy_session_handler, gateway/run.py) : toujours enveloppé, voir _as_conversation.
+    # (set_busy_session_handler, gateway/run_adapters.py) : toujours enveloppé, voir _as_conversation.
     @property
     def _busy_session_handler(self) -> Any:
         return getattr(self, "_busy_handler", None)
@@ -405,7 +716,7 @@ class SheldonAdapter(BasePlatformAdapter):
         (gateway/platforms/base.py) : set_busy_session_handler range le gestionnaire « occupé » dans
         _busy_session_handler, que handle_message relit (d'où la propriété plus haut), et MessageEvent
         porte allow_gateway_control, que ce gestionnaire lit avant de valider une approbation en
-        attente (gateway/run.py, _handle_active_session_busy_message). Qu'une version renomme l'un ou
+        attente (gateway/run_busy.py, _handle_active_session_busy_message). Qu'une version renomme l'un ou
         l'autre, et un « ok » tapé dans l'app validerait la commande, sans erreur."""
         try:
             fields = {field.name for field in dataclasses.fields(MessageEvent)}
@@ -419,7 +730,7 @@ class SheldonAdapter(BasePlatformAdapter):
             seen.append(event.allow_gateway_control)
             return True
 
-        # Le gateway a déjà posé son gestionnaire (gateway/run.py, avant connect()) : il est remis tel quel.
+        # Le gateway a déjà posé son gestionnaire (gateway/run_adapters.py, avant connect()) : il est remis tel quel.
         previous = getattr(self, "_busy_handler", None)
         try:
             self.set_busy_session_handler(probe)
@@ -522,7 +833,7 @@ class SheldonAdapter(BasePlatformAdapter):
 
         Lu ici, pendant connect() : le gateway attend la fin de toutes les connexions avant
         d'envoyer son message de redémarrage, puis d'effacer .restart_notify.json
-        (gateway/run.py, start() puis _send_restart_notification)."""
+        (gateway/run_startup.py, start(), puis gateway/run_notifications.py, _send_restart_notification)."""
         home = paths.hermes_home()
         try:
             note = welcome.take_target(paths.welcome_note(), home, time.time())
@@ -686,7 +997,7 @@ class SheldonAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Sheldon not connected", retryable=True)
         request = self._runtime.clarify(
             chat_id=chat_id, question=question, choices=choices, clarify_id=clarify_id,
-            session_key=session_key, timeout=_clarify_timeout(),
+            session_key=session_key, timeout=_clarify_timeout(), cwd=self._session_folder(session_key),
         )
         return SendResult(success=True, message_id=request.id)
 
@@ -708,8 +1019,20 @@ class SheldonAdapter(BasePlatformAdapter):
         request = self._runtime.approval(
             chat_id=chat_id, command=command, description=description, session_key=session_key,
             allow_session=allow_session, allow_permanent=allow_permanent, timeout=_approval_timeout(),
+            cwd=self._session_folder(session_key),
         )
         return SendResult(success=True, message_id=request.id)
+
+    def _session_folder(self, session_key: str) -> Optional[str]:
+        """Le dossier de travail de la session de ce tour (spec 12) : le gateway donne aux outils
+        l'id de la session comme task_id (gateway/run_turn_runner.py), retrouvé par sa clé
+        (gateway/session.py, SessionStore.peek_session_id). None sur toute erreur."""
+        store = getattr(getattr(self, "gateway_runner", None), "session_store", None)
+        try:
+            session_id = store.peek_session_id(session_key) if store is not None else None
+        except Exception:
+            return None
+        return workspace_root(session_id) if isinstance(session_id, str) else None
 
     async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **_kwargs: Any) -> SendResult:
         return await self._on_runtime_loop(self._send_file(chat_id, image_path, "image", caption), _abandoned())
@@ -825,7 +1148,7 @@ class SheldonAdapter(BasePlatformAdapter):
         """La commande qu'Hermes lancerait pour ce texte, et ses arguments : son nom d'Hermes (alias
         compris), ou, pour un nom qu'Hermes ne connaît pas, celui d'un raccourci de config.yaml
         (quick_commands de type alias), que le gateway développe avant de lancer la commande
-        (gateway/run.py, _handle_message). None pour un texte qui n'est pas une commande."""
+        (gateway/run_inbound.py, _handle_message). None pour un texte qui n'est pas une commande."""
         name, args = command_parts(text)
         if name is None:
             return None

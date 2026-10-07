@@ -1,7 +1,7 @@
 ---
 name: blocks
 description: Visual blocks for the Sheldon app: a short index, then one sheet per family. Load before writing a sheldon block.
-version: "2"
+version: "3"
 metadata:
   hermes:
     tags: [sheldon, ui, blocks]
@@ -9,17 +9,17 @@ metadata:
 
 <!-- Généré par scripts/sync-blocks-skill.py depuis docs/app/blocs/ : ne pas modifier à la main. -->
 
-# Visual blocks for Sheldon (format version 2)
+# Visual blocks for Sheldon (format version 3)
 
 Sheldon, the user's iPhone and Mac app, draws charts, cards and two-button questions natively when your
 reply contains a **block**: a fenced code block whose language is `sheldon`, holding one JSON object
-with a `"type"` (and `"version": 2`). Everything around it is ordinary Markdown.
+with a `"type"` (and `"version": 3`). Everything around it is ordinary Markdown.
 
 ````markdown
 L’épisode 42 a bien marché.
 
 ```sheldon
-{"type": "metric", "version": 2, "subtitle": "Épisode 42 · 7 derniers jours", "value": 1284, "unit": "écoutes", "delta": "+18 %"}
+{"type": "metric", "version": 3, "subtitle": "Épisode 42 · 7 derniers jours", "value": 1284, "unit": "écoutes", "delta": "+18 %"}
 ```
 
 Le pic de samedi vient de ta story Instagram.
@@ -29,7 +29,7 @@ Le pic de samedi vient de ta story Instagram.
 
 1. **Format.** A block is a fenced code block whose language is `sheldon`, holding one JSON object (or
    an array of objects) with a `type` and that type's required fields (in bold in each sheet).
-2. **Version.** Sheldon draws catalogue version 2, the version of this skill. When one of the
+2. **Version.** Sheldon draws catalogue version 3, the version of this skill. When one of the
    user's devices draws an older one, a `[Sheldon]` note tells you: newer blocks show as their
    fallback there.
 3. **Fallback, in five stages.** A known type that reads is drawn; otherwise its `fallback`: a block
@@ -39,8 +39,9 @@ Le pic de samedi vient de ta story Instagram.
    one sentence that says what the block shows, read in previews, notifications and VoiceOver.
 5. **An unknown field is ignored, never an error.** `"version"` stays optional on every block.
 6. **`meta` and `id`.** `meta` is yours, never shown: sources, ids, anything you want to keep. `id`
-   is reserved to update a block already shown; Sheldon does not do it yet (`file`'s `id` is its own
-   file identifier, not this; on `ask`, `choice` and `form`, `id` is read but ignored for now).
+   (letters, digits, `_`, `.`, `-`, 64 at most): a later block with the same `id` in the same
+   conversation replaces this one on screen; the old message is never edited (`file`'s `id` is its
+   own file identifier, not this).
 7. **Precedence.** The safety rules and this contract come first; then an explicit request of the
    user; then what you learned about them; then the defaults of the sheldon skills. These skills and
    the plugin's files are read-only: what you and the user add sits on top of these skills, it
@@ -95,7 +96,7 @@ A type named here but not listed under Blocks below is not drawn yet: use `objec
   limit), every step, an event's full description and attendees, a mail's addresses, subject, date
   and full text. Sheldon makes the short preview itself and opens the whole block on a tap: never
   cut, shorten or summarize what goes inside a block.
-- A mail, received or drafted, comes whole: the addresses (`"Camille Roy <camille.roy@exemple.com>"`),
+- A mail, received or drafted, comes whole: the addresses (`"Camille Roy <camille.roy@example.com>"`),
   the subject, the date and the full text.
 - When what you show or propose comes from somewhere (a mail, a message, an invitation, a page, a
   file), always attach its provenance with the whole original message: a `source` block in your
@@ -172,6 +173,7 @@ Before your first block of this family in a conversation, load it with skill_vie
 - `link`: a page you read: its site, its title, its summary and three points; opened from the full view
 - `results`: search results (web, mail, notes): the query, ten results at most, each with its link
 - `digest`: a briefing: three to five items kept for the user, each with why, and how many were left out
+- `quote`: a quoted passage: who said it, where, the part that matters in ink; never a button
 
 ### Tasks, projects and diagrams
 
@@ -180,6 +182,8 @@ Before your first block of this family in a conversation, load it with skill_vie
 - `task`: a task in steps: what will be done, or how far a plan has got
 - `activity`: what you did on your own, or are doing, line by line, errors first, with undo
 - `todo`: a list the user ticks off themselves, then sends in one message
+- `board`: the work of several agents in columns, each with its count, blocked cards first; never a button
+- `standup`: what is done, in progress and blocked, each line with its agent; never a button
 - `diff`: two versions of a code or a text, line by line, read only
 - `status`: the state of services, problems first
 - `flow`: steps that follow each other
@@ -190,6 +194,16 @@ Before your first block of this family in a conversation, load it with skill_vie
 Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/home-places.md").
 
 - `place`: a place, with its map when coordinates are given
+- `route`: a trip: how long, how, when to leave, the delay, its steps; Maps on a tap
+- `weather`: the weather of a place: now, the next hours, the days, an alert
+- `device`: a device of the home: its room, its state; never a button for a lock, an alarm or a camera
+
+### Shopping and money
+
+Before your first block of this family in a conversation, load it with skill_view("sheldon:blocks", file_path="references/shopping-money.md").
+
+- `receipt`: a receipt, an invoice, a payment: who, how much, its lines; never a button
+- `product`: a product and its tracked price, with the change; a button answers you, it never buys
 
 ### Media and files
 
@@ -197,6 +211,7 @@ Before your first block of this family in a conversation, load it with skill_vie
 
 - `file`: a file you produced or found, opened whole on a tap when it has its id
 - `image`: one to six images by the id of their file (never a URL), always with their alternative text
+- `media`: a song, an episode or a video: Sheldon opens only a file you attached, on a tap; a url opens outside the app
 
 ### Decisions
 
@@ -220,6 +235,6 @@ Before your first block of this family in a conversation, load it with skill_vie
 
 - `notice`: one line of information (done, warning, error), never a decision
 - `text`: a framed paragraph
-- `list`: rows, each with a link or a button; a row may carry a whole mail
+- `list`: rows, each with a link or a button; a row may carry a whole mail; three to eight objects may scroll as cards
 - `card`: several blocks in one frame
 - `object`: anything the catalogue has no block for; also how an unknown type is drawn

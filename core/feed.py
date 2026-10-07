@@ -62,6 +62,8 @@ class FeedItem:
     # La provenance de ce que l'agent a fait : le premier bloc `source` de sa réponse
     # (source.source_in_text), montrée sur la carte et en haut de « Voir ».
     source: Optional[Dict[str, Any]] = None
+    # Le projet d'Hermes du dossier de la tâche (spec 12, core/projects.project_json), ou None.
+    project: Optional[Dict[str, Optional[str]]] = None
 
     @property
     def thread_id(self) -> str:
@@ -79,10 +81,11 @@ class FeedItem:
             "createdAt": iso_utc(self.created_at),
             "jobId": self.job_id,
             "source": dict(self.source) if self.source else None,
+            "project": dict(self.project) if self.project else None,
         }
 
 
-_COLUMNS = "seq, id, kind, conversation_id, agent_id, title, summary, text, job_id, session_id, created_at, files, source"
+_COLUMNS = "seq, id, kind, conversation_id, agent_id, title, summary, text, job_id, session_id, created_at, files, source, project"
 
 
 def _item(row: Optional[sqlite3.Row]) -> Optional[FeedItem]:
@@ -92,6 +95,7 @@ def _item(row: Optional[sqlite3.Row]) -> Optional[FeedItem]:
         row["id"], row["kind"], row["conversation_id"], row["agent_id"], row["title"], row["summary"],
         row["text"], row["job_id"], row["session_id"], row["created_at"], row["seq"], json.loads(row["files"]),
         json.loads(row["source"]) if row["source"] else None,
+        json.loads(row["project"]) if row["project"] else None,
     )
 
 
@@ -110,7 +114,8 @@ CREATE TABLE IF NOT EXISTS feed_items (
     session_id TEXT,
     created_at REAL NOT NULL,
     files TEXT NOT NULL DEFAULT '[]',
-    source TEXT
+    source TEXT,
+    project TEXT
 );
 """
 
@@ -118,7 +123,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
         super().__init__(path, clock)
         # Une base d'avant la provenance a déjà sa table, sans cette colonne : CREATE TABLE IF NOT
         # EXISTS ne la touche pas.
-        ensure_columns(self._conn, "feed_items", {"source": "TEXT"})
+        ensure_columns(self._conn, "feed_items", {"source": "TEXT", "project": "TEXT"})
 
     def add(
         self,
@@ -131,6 +136,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
         session_id: Optional[str],
         kind: str = "task",
         file_ids: Sequence[str] = (),
+        project: Optional[Dict[str, Optional[str]]] = None,
     ) -> FeedItem:
         item_id = f"f-{uuid.uuid4().hex}"
         # D'où vient ce que l'agent a fait : le premier bloc `source` de sa réponse, s'il y en a un.
@@ -138,9 +144,10 @@ CREATE TABLE IF NOT EXISTS feed_items (
         with self._lock:
             self._conn.execute(
                 "INSERT INTO feed_items (id, kind, conversation_id, agent_id, title, summary, text, job_id, "
-                "session_id, created_at, files, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "session_id, created_at, files, source, project) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (item_id, kind, conversation_id, agent_id, title, first_line(text), text, job_id, session_id,
-                 self._clock(), json.dumps(list(file_ids)), json.dumps(source, ensure_ascii=False) if source else None),
+                 self._clock(), json.dumps(list(file_ids)), json.dumps(source, ensure_ascii=False) if source else None,
+                 json.dumps(project, ensure_ascii=False) if project else None),
             )
         item = self.get(item_id)
         assert item is not None

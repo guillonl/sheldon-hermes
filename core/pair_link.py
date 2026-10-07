@@ -202,13 +202,29 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s+", " ", text).lower()
 
 
-def _guarded_fragments() -> List[str]:
+@dataclass(frozen=True)
+class GuardedPlaces:
+    """Ce que la garde ferme : le dossier de données de Sheldon, les dossiers du plugin et le port local."""
+
+    data: Path
+    plugins: Tuple[Path, ...]
+    port: int
+
+
+def guarded_places() -> GuardedPlaces:
+    """Les lieux de Sheldon pour le HERMES_HOME courant. La garde du profil par défaut les relit à
+    chaque appel ; celle des autres profils servis les reçoit figés au démarrage du gateway (revue
+    finale 47, I3), car le HERMES_HOME de leurs tours est le leur (profiles/<nom>)."""
+    return GuardedPlaces(paths.data_dir(), tuple(paths.plugin_dirs()), paths.local_port())
+
+
+def _guarded_fragments(places: GuardedPlaces) -> List[str]:
     """Ce que cite une commande qui vise Sheldon : sa base, son dossier (chemin donné et chemin
     réel), son port local, ses routes d'appairage et d'appareils, sa commande, son réglage
     (hermes setup, qui mène à l'appairage hors du gateway), la clé APNs et les QR codes."""
-    data = paths.data_dir()
+    data = places.data
     fragments = (
-        str(data), str(data.resolve()), ".hermes/sheldon", "sheldon.db", f":{paths.local_port()}",
+        str(data), str(data.resolve()), ".hermes/sheldon", "sheldon.db", f":{places.port}",
         "/v1/pair", "/v1/devices", "hermes sheldon", "hermes setup", "gateway setup", "AuthKey.p8",
         PAIR_IMAGE_PREFIX,
         # Les lecteurs génériques de la clé : grep -rn "PRIVATE KEY" ~/.hermes, cat .../apns/*.p8.
@@ -217,13 +233,13 @@ def _guarded_fragments() -> List[str]:
     return [_one_line(fragment) for fragment in fragments]
 
 
-def _plugin_fragments() -> List[str]:
+def _plugin_fragments(places: GuardedPlaces) -> List[str]:
     """Ce que cite une commande qui vise le dossier du plugin (spec 3.3) : « plugins/sheldon »
     (~/.hermes/plugins/sheldon, $HERMES_HOME/plugins/sheldon, ou plugins/sheldon depuis
-    ~/.hermes), puis chaque dossier de paths.plugin_dirs(), chemin donné et chemin réel. Une
+    ~/.hermes), puis chaque dossier du plugin, chemin donné et chemin réel. Une
     lecture par le terminal (cat) est donc refusée aussi : read_file reste ouvert."""
     fragments = ["plugins/sheldon"]
-    for folder in paths.plugin_dirs():
+    for folder in places.plugins:
         fragments += [str(folder), os.path.realpath(folder)]
     return [_one_line(fragment) for fragment in fragments]
 
@@ -244,9 +260,9 @@ def _shell_reaches(folder: str, text: str, start: List[str], steps: List[List[st
     return re.search(_WORD_START + re.escape(name) + _PLUGIN_END, _SHELL_CD.sub(" ", text)) is not None
 
 
-def _cites_plugin(text: str) -> bool:
+def _cites_plugin(text: str, places: GuardedPlaces) -> bool:
     """Le texte d'une commande, sur une ligne, cite-t-il un chemin du plugin, jusqu'à sa fin ?"""
-    return any(re.search(re.escape(fragment) + _PLUGIN_END, text) for fragment in _plugin_fragments())
+    return any(re.search(re.escape(fragment) + _PLUGIN_END, text) for fragment in _plugin_fragments(places))
 
 
 def _shell_folders(args: Any, bases: Callable[[], List[str]]) -> List[Tuple[str, Callable[[], List[str]]]]:
@@ -378,12 +394,15 @@ def _reaches_plugin(raw: str, plugins: List[str], bases: Callable[[], List[str]]
 
 
 def _guard_message(
-    tool_name: str, args: Any, task_id: str = "", base_dir: Optional[Callable[[str], Optional[str]]] = None
+    tool_name: str, args: Any, task_id: str = "", base_dir: Optional[Callable[[str], Optional[str]]] = None,
+    places: Optional[GuardedPlaces] = None,
 ) -> Optional[str]:
     """Le message du blocage, ou None. GUARD_MESSAGE pour ce qui vise Sheldon (sa base, son
     dossier, sa clé APNs, ses QR codes), toujours vérifié d'abord ; PLUGIN_GUARD_MESSAGE pour ce
-    qui écrirait dans le dossier du plugin (spec 3.3)."""
-    data = _casefolded(os.path.realpath(paths.data_dir()))
+    qui écrirait dans le dossier du plugin (spec 3.3). places : les lieux figés de la garde d'un
+    autre profil, sinon ceux du HERMES_HOME courant."""
+    places = places or guarded_places()
+    data = _casefolded(os.path.realpath(places.data))
     # Hermes résout un chemin relatif contre le dossier que le terminal de la session a
     # enregistré (tools/file_tools.py, _resolve_base_dir(task_id)) : « cd ~/.hermes », puis
     # « sheldon ». Connue, cette base est la seule : _resolve_base_dir suit déjà l'échelle
@@ -398,7 +417,7 @@ def _guard_message(
             found.append([session] if session else [b for b in (os.environ.get("TERMINAL_CWD"), os.getcwd()) if b])
         return found[0]
 
-    plugins = [_casefolded(os.path.realpath(folder)) for folder in paths.plugin_dirs()]
+    plugins = [_casefolded(os.path.realpath(folder)) for folder in places.plugins]
     if tool_name in _GUARDED_TOOLS:
         # Le texte entier, puis les dossiers où la commande tourne et entre (workdir, cd, pushd),
         # résolus comme le chemin d'un outil de fichiers : « cd ~/.hermes/plugins », puis
@@ -411,13 +430,13 @@ def _guard_message(
         start = [] if has_workdir else [_casefolded(os.path.realpath(os.path.expanduser(base))) for base in bases()]
         steps = [[_casefolded(os.path.realpath(path)) for path in _candidates(target, folder)] for target, folder in folders]
         if (
-            any(fragment in text for fragment in _guarded_fragments())
+            any(fragment in text for fragment in _guarded_fragments(places))
             or any(_reaches_sheldon(target, data, folder, None) for target, folder in folders)
             or _shell_reaches(data, text, start, steps)
         ):
             return GUARD_MESSAGE
         if (
-            _cites_plugin(text)
+            _cites_plugin(text, places)
             or any(_reaches_plugin(target, plugins, folder) for target, folder in folders)
             or any(_shell_reaches(plugin, text, start, steps) for plugin in plugins)
         ):
@@ -437,6 +456,7 @@ def guard_tool_call(
     args: Any = None,
     task_id: str = "",
     base_dir: Optional[Callable[[str], Optional[str]]] = None,
+    places: Optional[GuardedPlaces] = None,
     **_kwargs: Any,
 ) -> Optional[Dict[str, str]]:
     """Le crochet pre_tool_call d'Hermes : bloque toute commande ou tout code qui vise Sheldon,
@@ -446,6 +466,9 @@ def guard_tool_call(
     message d'un {"action": "block"} le résultat que voit le modèle. Hermes accepte aussi
     {"action": "approve"} (validation humaine) : bloquer est plus simple et plus sûr, l'utilisateur
     lance ces commandes lui-même par SSH.
+
+    places : les lieux de Sheldon figés au démarrage du gateway, pour la garde posée dans les
+    autres profils servis (guarded_places) ; sans eux, ceux du HERMES_HOME courant.
 
     Le dossier du plugin (paths.plugin_dirs : le paquet réel et son dossier d'installation) :
     read_file et search_files y restent permis, pour qu'Hermes relise ses consignes ; tout
@@ -473,7 +496,7 @@ def guard_tool_call(
     doute, avec GUARD_MESSAGE.
     """
     try:
-        message = _guard_message(tool_name, args, task_id, base_dir)
+        message = _guard_message(tool_name, args, task_id, base_dir, places)
     except Exception:
         logger.warning("Sheldon: guard could not read the arguments of %s, blocked", tool_name, exc_info=True)
         message = GUARD_MESSAGE

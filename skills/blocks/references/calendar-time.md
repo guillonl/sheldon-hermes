@@ -20,7 +20,7 @@ is a label (it answers you) or `{label, url}` (it opens the link).
 Examples:
 
 ```sheldon
-{"type": "event", "title": "Dîner avec Alex", "start": "2026-09-26T20:00", "end": "2026-09-26T22:00", "place": "Le Mary Céleste, Paris", "attendees": ["Alex Dubois <alex.dubois@exemple.com>"], "note": "Table pour deux réservée au nom d’Alex. Le restaurant garde la table quinze minutes.", "action": "Ajouter", "secondary": "Plus tard"}
+{"type": "event", "title": "Dîner avec Alex", "start": "2026-09-26T20:00", "end": "2026-09-26T22:00", "place": "Le Mary Céleste, Paris", "attendees": ["Alex Dubois <alex.dubois@example.com>"], "note": "Table pour deux réservée au nom d’Alex. Le restaurant garde la table quinze minutes.", "action": "Ajouter", "secondary": "Plus tard"}
 ```
 
 ```sheldon

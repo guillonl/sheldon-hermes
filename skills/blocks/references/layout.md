@@ -49,18 +49,24 @@ Examples:
 
 Rows, each with a link or a button.
 
-Fields: **`items`** (`[{title, subtitle?, value?, url?, action?, mail?}]`, 20 at most). A row's `mail`
-(the fields of a `mail` block) opens that mail in full on a tap: an inbox digest, the newsletters you
-archived.
+Fields: **`items`** (`[{title, subtitle?, value?, url?, action?, mail?, object?}]`, 20 at most),
+`style` (`rows` by default, or `carousel`). A row's `mail` (the fields of a `mail` block) opens that mail
+in full on a tap: an inbox digest, the newsletters you archived.
 
 Preview: the first 5 rows, then "N autres". Full view: every row; a row with a `mail` opens that mail.
 
 Buttons: one per row, its `action` (a label answers you as `label · row title`) or its `url`.
 
+Carousel: with `"style": "carousel"` and three to eight rows that each carry an `object` (the fields of
+an `object` block: three hotels, four flights), Sheldon draws the objects as cards that scroll
+sideways, each with its own buttons (`label · object title`); at the largest text sizes, one under the
+other. Otherwise it stays a list of rows, which do not show their `object`: always give each row its
+`title`, as an older Sheldon shows only the rows.
+
 Examples:
 
 ```sheldon
-{"type": "list", "title": "Archivés", "items": [{"title": "Figma", "subtitle": "Les replays de Config sont en ligne", "action": "Restaurer", "mail": {"from": "Figma <news@exemple.com>", "subject": "Les replays de Config sont en ligne", "date": "2026-10-01T16:05", "body": "Les 91 conférences de Config 2026 sont en ligne, en accès libre."}}, {"title": "Medium", "subtitle": "Ta sélection de la semaine", "action": "Restaurer"}]}
+{"type": "list", "title": "Archivés", "items": [{"title": "Figma", "subtitle": "Les replays de Config sont en ligne", "action": "Restaurer", "mail": {"from": "Figma <news@example.com>", "subject": "Les replays de Config sont en ligne", "date": "2026-10-01T16:05", "body": "Les 91 conférences de Config 2026 sont en ligne, en accès libre."}}, {"title": "Medium", "subtitle": "Ta sélection de la semaine", "action": "Restaurer"}]}
 ```
 
 ```sheldon

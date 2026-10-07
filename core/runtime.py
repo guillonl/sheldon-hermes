@@ -18,28 +18,30 @@ import logging
 import sqlite3
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, ContextManager, Dict, List, Optional, Protocol, Sequence, Tuple
+from typing import Any, Callable, ContextManager, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 from . import media
 from .agent_watch import AgentWatch
+from .bots import BotChatLinks, plan_link
 from .bridge import DEFAULT_CURSOR, SheldonBridge, Submit
 from .calls import (
     AGENT_ID, CALL_RING_WINDOW_SECONDS, MAX_REASON_LENGTH, REQUESTED_IGNORED, CallStore, call_result, in_quiet_hours,
 )
-from .conversations import MAX_TITLE_LENGTH, Agent, Conversation, ConversationCatalog, ConversationError
+from .conversations import AGENT_PREFIX, MAX_TITLE_LENGTH, Agent, Conversation, ConversationCatalog, ConversationError
 from .events import Events
 from .feed import FeedItem, FeedStore, build_steps, last_reasoning, parse_cron_delivery
 from .files import FileError, FileStore, StoredFile
 from .history import (
-    HistoryPage, HistoryReader, MessageLoader, SessionLocator, latest_cron_session, session_key_for,
+    HistoryPage, HistoryReader, LinkedSessions, MessageLoader, SessionLocator, latest_cron_session, session_key_for,
     state_db_candidates,
 )
 from .timeutil import iso_utc
 from .hub import EventHub
 from .notices import NoticeStore
 from .outbox import Outbox, OutboxRelay
+from .projects import project_json
 from .push import PushService, load_config
 from .requests import (
     EXPIRED_TIMEOUT, MAX_IMPORTANT_PER_HOUR, Request, RequestError, RequestService, RequestStore, Resolvers, validate_proposal,
@@ -61,6 +63,9 @@ MAX_THREAD_CONTEXT = 4000
 # est livré comme un fichier ordinaire, avec notification (constat Important 2, relecture du
 # lot 12-13).
 CRON_FILE_ATTACH_WINDOW_SECONDS = 30.0
+# Spec 10, A8 : le début d'une ligne de la revue d'Hermes (locales/en.yaml, display.review :
+# « 💾 Self-improvement review: {summary} », traduite dans les autres langues après le « 💾 »).
+LEARNING_PREFIX = "\N{FLOPPY DISK}"
 # Chaque proposition est une notification avec son : un agent manipulé (un courriel lu par une
 # tâche planifiée) ou une tâche qui boucle ne doit pas en noyer l'utilisateur (revue de la branche, M1).
 MAX_WAITING_PROPOSALS = 10
@@ -191,6 +196,46 @@ class HermesPort(Protocol):
 
     def image_cache_dir(self) -> Path: ...
 
+    def bot_chat_session(self, agent: Agent) -> Optional[str]:
+        """La session « Bot Chat » du profil de cet agent (Bot Mode), lue dans sa base ; None sinon."""
+        ...
+
+    def link_session(self, session_key: str, session_id: str) -> bool:
+        """Fait pointer la clé de session d'un chat vers une session existante, comme /resume ;
+        False si Hermes refuse, ou sur toute erreur."""
+        ...
+
+    def session_of(self, session_key: str) -> Optional[str]:
+        """La session que vise vraiment cette clé dans le gateway ; None si elle lui est inconnue,
+        hors du gateway, ou sur toute erreur."""
+        ...
+
+    def job_workdir(self, job_id: str) -> Optional[str]:
+        """Le dossier de travail d'une tâche planifiée (workdir), ou None."""
+        ...
+
+    def project_for(self, profile: Optional[str], path: Optional[str]) -> Optional[Dict[str, Any]]:
+        """Le projet d'Hermes de ce dossier, dans la base de ce profil, lue sans y écrire
+        (hermes_cli/projects_db.py, project_for_path) ; None sans projet, ou sur toute erreur."""
+        ...
+
+    def guard_profiles(self, agents: List[Agent]) -> None:
+        """Pose la garde des outils et le contexte de tour dans le gestionnaire d'extensions de chaque
+        autre profil de cette liste (revue finale 47, I3), sans doublon. Hors du gateway, rien."""
+        ...
+
+
+def project_of(port: HermesPort, profile: Optional[str], folder: Optional[str]) -> Optional[Dict[str, Optional[str]]]:
+    """Le projet d'une demande ou d'une carte (spec 12), vérifié par project_json. Une base
+    illisible ou un projet mal formé ne coûtent que la pastille, jamais la demande ni la carte."""
+    if not folder:
+        return None
+    try:
+        return project_json(port.project_for(profile, folder))
+    except Exception:
+        logger.warning("Sheldon: Hermes project of a folder unavailable", exc_info=True)
+        return None
+
 
 @dataclass(frozen=True)
 class Route:
@@ -259,9 +304,14 @@ class Deliveries:
                 # livraison passe quand même, sans ses pas (revue finale, M14).
                 logger.warning("Sheldon: session of cron job %s unavailable", job, exc_info=True)
                 session_id = None
+            try:
+                workdir = self._port.job_workdir(job)
+            except Exception:
+                workdir = None
             item = self._feed.add(
                 conversation_id=conversation.id, agent_id=agent.id, title=name or self._port.job_name(job) or job,
                 text=text, job_id=job, session_id=session_id, file_ids=[f.id for f in stored],
+                project=project_of(self._port, agent.id, workdir),
             )
         return Delivery(conversation, text, item, stored)
 
@@ -334,7 +384,10 @@ class Runtime:
         # voir file_sent() et CRON_FILE_ATTACH_WINDOW_SECONDS.
         self._recent_cron_cards: Dict[str, Tuple[FeedItem, float]] = {}
         self.hub = EventHub()
-        self.catalog = ConversationCatalog(db, port.agents, port.multiplex, clock=clock)
+        # Le chat d'un bot de Bot Mode branché sur sa session « Bot Chat » (tâche 44) : avant le
+        # catalogue, qui dit pour chaque agent si son branchement tient (Agent.bot_chat).
+        self.bot_chats = BotChatLinks(db, clock=clock)
+        self.catalog = ConversationCatalog(db, self._agents_with_links, port.multiplex, clock=clock)
         self.files = FileStore(db, files_dir, clock=clock)
         self.feed = FeedStore(db, clock=clock)
         self.outbox = Outbox(db, clock=clock)
@@ -362,7 +415,10 @@ class Runtime:
         )
         self.deliveries = Deliveries(self.catalog, self.feed, self.files, port)
         # Les profils créés ou retirés pendant que le gateway tourne (voir core/agent_watch.py).
-        self.agent_watch = AgentWatch(self.catalog.agents, self.catalog.conversation_id_for, self.outbox, clock=clock)
+        # Chaque relecture repose aussi la garde dans les autres profils (revue finale 47, I3).
+        self.agent_watch = AgentWatch(
+            self.catalog.agents, self.catalog.conversation_id_for, self.outbox, clock=clock, on_look=self._guard_profiles,
+        )
         self.relay = OutboxRelay(
             self.outbox,
             {
@@ -380,6 +436,10 @@ class Runtime:
         )
         self._histories: Dict[Tuple[str, str, str], Any] = {}
         self._relay_task: Optional["asyncio.Task[None]"] = None
+        self._link_task: Optional["asyncio.Task[None]"] = None
+        self._link_lock = asyncio.Lock()
+        # Les chats que la passe a sautés pendant un de leurs tours (revue finale 47, M11).
+        self._links_after_turn: Set[str] = set()
 
     # Démarrage et arrêt, avec le gateway.
 
@@ -393,10 +453,16 @@ class Runtime:
             # Le relais doit démarrer même si l'expiration au démarrage échoue : sans lui,
             # plus aucune proposition ni livraison d'un autre processus n'arriverait jamais.
             logger.exception("Sheldon: could not expire blocking requests at startup")
+        self._guard_profiles()
         self._relay_task = asyncio.ensure_future(self.relay.run())
+        self._schedule_bot_chat_links()
 
     async def stop(self) -> None:
         self.bridge.close()
+        if self._link_task is not None:
+            self._link_task.cancel()
+            await asyncio.gather(self._link_task, return_exceptions=True)
+            self._link_task = None
         if self._relay_task is not None:
             self._relay_task.cancel()
             await asyncio.gather(self._relay_task, return_exceptions=True)
@@ -404,7 +470,7 @@ class Runtime:
         await self.events.push.aclose()
 
     def close(self) -> None:
-        for store in (self.catalog, self.files, self.feed, self.outbox, self.calls, self.notices, self.requests.store):
+        for store in (self.catalog, self.files, self.feed, self.outbox, self.calls, self.notices, self.requests.store, self.bot_chats):
             with contextlib.suppress(Exception):
                 store.close()
 
@@ -413,7 +479,92 @@ class Runtime:
         try:
             self.requests.expire_due()
         finally:
-            self.agent_watch.check()
+            if self.agent_watch.check():
+                # Un agent né ou changé (agent.upsert) : son branchement sur « Bot Chat » se refait.
+                self._schedule_bot_chat_links()
+
+    def _guard_profiles(self, agents: Optional[List[Agent]] = None) -> None:
+        """La garde et le contexte de tour dans chaque profil servi (revue finale 47, I3) : au
+        démarrage, puis à chaque relecture des agents, ce qui couvre un profil né pendant la vie du
+        gateway. Une relecture forcée des extensions d'Hermes, qui les efface, est réparée dès leur
+        effacement (adapter.py, _keep_after_forced_reload), ou seulement ici sur un Hermes qui n'a
+        pas les méthodes enveloppées. Ne lève jamais."""
+        try:
+            self.port.guard_profiles(self.catalog.agents() if agents is None else agents)
+        except Exception:
+            logger.warning("Sheldon: guard of the other profiles not installed", exc_info=True)
+
+    # Les bots de Bot Mode (tâche 44, spec 12).
+
+    def _agents_with_links(self) -> List[Agent]:
+        return [
+            agent if agent.is_default else replace(agent, bot_chat=self.bot_chats.get(AGENT_PREFIX + agent.id) is not None)
+            for agent in self.port.agents()
+        ]
+
+    def _schedule_bot_chat_links(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._link_task is None or self._link_task.done():
+            self._link_task = loop.create_task(self.link_bot_chats())
+
+    async def link_bot_chats(self) -> None:
+        """Fait suivre au chat de chaque bot de Bot Mode sa session « Bot Chat », une fois, puis de
+        nouveau si elle change, ou si la clé du chat vise une autre session dans le gateway (un /new,
+        revue finale 47, M3). Jamais le chat principal, seulement avec le multiplex. Sur un refus ou
+        une erreur, le lien s'efface : le chat d'aujourd'hui, sans rien dire à l'utilisateur.
+        L'app l'apprend par Agent.botChat (GET /v1/agents, agent.upsert de AgentWatch). Ne lève jamais."""
+        async with self._link_lock:
+            try:
+                multiplex = self.port.multiplex()
+                agents = [agent for agent in self.port.agents() if not agent.is_default]
+            except Exception:
+                logger.warning("Sheldon: agents unavailable, Bot Chat links unchanged", exc_info=True)
+                return
+            for agent in agents:
+                conversation_id = AGENT_PREFIX + agent.id
+                linked = self.bot_chats.get(conversation_id)
+                bot_chat: Optional[str] = None
+                if multiplex and agent.bot_managed:
+                    try:
+                        bot_chat = await asyncio.to_thread(self.port.bot_chat_session, agent)
+                    except Exception:
+                        # Une base verrouillée un instant ne défait pas un branchement qui tient.
+                        logger.warning("Sheldon: Bot Chat of %s unreadable", agent.id, exc_info=True)
+                        continue
+                self._links_after_turn.discard(conversation_id)
+                conversation = Conversation(conversation_id, agent.name, "agent", agent.id, conversation_id)
+                key = session_key_for(conversation, agent)
+                # La session que la clé vise vraiment : un /new depuis l'app lui en donne une neuve, que le
+                # lien rangé ignore. Une clé que le gateway ne connaît pas encore garde le lien rangé.
+                current = self.port.session_of(key) or linked
+                target = plan_link(multiplex=multiplex, bot_managed=agent.bot_managed, bot_chat=bot_chat, linked=current)
+                if target is None:
+                    if bot_chat is not None and current == bot_chat and linked != bot_chat:
+                        # La clé vise déjà « Bot Chat », mais la ligne manque (sheldon.db remise à zéro, Bot
+                        # Mode coupé puis rallumé) ou en vise une autre : elle revient sans rebasculer, comme
+                        # après la bascule (re-relecture 47, N3).
+                        self.bot_chats.set(conversation_id, bot_chat)
+                    elif linked is not None and bot_chat != linked:
+                        # Plus de Bot Mode, de « Bot Chat » ou de multiplex : le chat d'aujourd'hui.
+                        self.bot_chats.clear(conversation_id)
+                    continue
+                if self.bridge.is_turn_open(conversation_id):
+                    # Jamais pendant un tour de ce chat (revue finale 47, M11) : switch_session et l'oubli de
+                    # l'agent partiraient sans libérer le tour, contrairement à /resume. Sa fin relance la passe.
+                    self._links_after_turn.add(conversation_id)
+                    continue
+                try:
+                    done = await asyncio.to_thread(self.port.link_session, key, target)
+                except Exception:
+                    done = False
+                if done:
+                    self.bot_chats.set(conversation_id, target)
+                else:
+                    logger.info("Sheldon: chat of %s stays on its own session (Bot Chat link refused)", agent.id)
+                    self.bot_chats.clear(conversation_id)
 
     # Ce que lit la porte d'entrée.
 
@@ -434,9 +585,16 @@ class Runtime:
                 session_key_for(conversation, agent),
                 include_legacy=conversation.kind == "main",
             )
+            # Le chat d'un bot branché sur « Bot Chat » lit aussi cette session, dans la base du profil.
+            conversation_id = conversation.id
+            sessions = LinkedSessions(
+                locator,
+                (lambda: self.bot_chats.get(conversation_id)) if conversation.kind == "agent" else (lambda: None),
+                Path(agent.home) / "state.db" if agent.home is not None else None,
+            )
             reader = HistoryReader(
-                locator.session_ids,
-                lambda: self.port.open_session_messages(locator.db),
+                sessions.session_ids,
+                lambda: self.port.open_session_messages(sessions.db),
                 messages_sent=self.store.has_client_messages,
                 attachment_for=self._attachment_for,
                 extract_media=self.port.extract_media,
@@ -575,6 +733,11 @@ class Runtime:
         job_id = (metadata or {}).get("job_id")
         if job_id:
             return self.publish_delivery(self.deliveries.record(chat_id, content, job_id=str(job_id)), push_plain=False)
+        if (metadata or {}).get("_interim_send") and content.lstrip().startswith(LEARNING_PREFIX):
+            # Spec 10, A8 : la ligne de la revue d'Hermes, « 💾 » puis sa phrase dans la langue
+            # d'Hermes (display.review.summary_callback), envoyée avec _interim_send après la
+            # réponse du tour (gateway/run_turn_runner.py, _make_bg_review_callbacks).
+            return self.bridge.assistant_sent(content, self.conversation_for_chat(chat_id).id, kind="learning")
         return self.bridge.assistant_sent(content, self.conversation_for_chat(chat_id).id, reply_to=reply_to)
 
     def edited(self, chat_id: str, message_id: str, content: str, final: bool) -> None:
@@ -587,9 +750,27 @@ class Runtime:
         self.bridge.turn_started(self.conversation_for_chat(chat_id).id, message_id)
 
     def turn_finished(self, chat_id: str, outcome: str, message_id: Optional[str] = None) -> None:
-        conversation_id = self.conversation_for_chat(chat_id).id
-        self.bridge.turn_finished(outcome, conversation_id, message_id)
-        self.requests.close_turn(conversation_id)
+        conversation = self.conversation_for_chat(chat_id)
+        self.bridge.turn_finished(outcome, conversation.id, message_id)
+        self.requests.close_turn(conversation.id)
+        self._link_after_turn(conversation)
+
+    def _link_after_turn(self, conversation: Conversation) -> None:
+        """La fin d'un tour du chat d'un bot de Bot Mode relance la passe de branchement quand ce
+        chat ne vise pas son lien : jamais ouvert jusqu'ici, la bascule était refusée (revue finale
+        47, M2), ou un /new lui a donné une session neuve (M3) ; ou quand la passe l'a sauté pendant
+        ce tour (M11). Ne lève jamais."""
+        try:
+            if conversation.kind != "agent":
+                return
+            agent = self.catalog.agent(conversation.agent_id)
+            if agent.is_default or not agent.bot_managed:
+                return
+            linked = self.bot_chats.get(conversation.id)
+            if conversation.id in self._links_after_turn or self.port.session_of(session_key_for(conversation, agent)) != linked:
+                self._schedule_bot_chat_links()
+        except Exception:
+            logger.warning("Sheldon: Bot Chat link not checked after a turn", exc_info=True)
 
     def file_sent(self, chat_id: str, path: str, kind: Optional[str], caption: Optional[str]) -> str:
         conversation = self.conversation_for_chat(chat_id)
@@ -635,12 +816,15 @@ class Runtime:
         clarify_id: str,
         session_key: str,
         timeout: Optional[float],
+        cwd: Optional[str] = None,
     ) -> Request:
+        """cwd : le dossier de la session d'Hermes, pour le projet de la demande (spec 12)."""
         conversation = self.conversation_for_chat(chat_id)
+        agent_id = self.catalog.agent(conversation.agent_id).id
         return self.requests.question(
-            conversation_id=conversation.id, agent_id=self.catalog.agent(conversation.agent_id).id,
+            conversation_id=conversation.id, agent_id=agent_id,
             question=question, choices=choices, clarify_id=clarify_id, session_key=session_key,
-            chat_id=chat_id, timeout=timeout,
+            chat_id=chat_id, timeout=timeout, project=project_of(self.port, agent_id, cwd),
         )
 
     def approval(
@@ -653,6 +837,7 @@ class Runtime:
         allow_session: bool,
         allow_permanent: bool,
         timeout: Optional[float],
+        cwd: Optional[str] = None,
     ) -> Request:
         # Hermes ne passe pas le request_id : on le retrouve dans sa file d'attente
         # (list_gateway_approvals : command, description, request_id) en appariant par
@@ -677,11 +862,12 @@ class Runtime:
         ]
         hermes_request_id = str(matching[0]["request_id"]) if matching else None
         conversation = self.conversation_for_chat(chat_id)
+        agent_id = self.catalog.agent(conversation.agent_id).id
         return self.requests.approval(
-            conversation_id=conversation.id, agent_id=self.catalog.agent(conversation.agent_id).id,
+            conversation_id=conversation.id, agent_id=agent_id,
             command=command, description=description, allow_session=allow_session,
             allow_permanent=allow_permanent, hermes_request_id=hermes_request_id,
-            session_key=session_key, chat_id=chat_id, timeout=timeout,
+            session_key=session_key, chat_id=chat_id, timeout=timeout, project=project_of(self.port, agent_id, cwd),
         )
 
     def publish_delivery(self, delivery: Delivery, push_plain: bool) -> str:
@@ -733,6 +919,8 @@ class ToolContext:
     cron_chat_id: str = ""
     # « 1 » dans une tâche planifiée (HERMES_CRON_SESSION, posé par cron/scheduler.py).
     cron_session: str = ""
+    # Le dossier de travail de la session, pour le projet d'une proposition (spec 12).
+    cwd: str = ""
 
     def opened_by_a_message(self) -> bool:
         """Vrai dans un tour de discussion ouvert par un message de l'utilisateur (ou relancé dans ce même
@@ -805,7 +993,7 @@ def propose(args: Any, context: ToolContext, db_path: Path, port: HermesPort, cl
         timeout = values.pop("timeout")
         request = store.insert(
             kind="question", origin="proposal", conversation_id=conversation.id, agent_id=agent.id,
-            chat_id=conversation.chat_id, timeout=timeout, **values,
+            chat_id=conversation.chat_id, timeout=timeout, project=project_of(port, agent.id, context.cwd), **values,
         )
         outbox.append("request.created", {"requestId": request.id})
         return json.dumps({

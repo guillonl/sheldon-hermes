@@ -22,7 +22,7 @@ is a label (it answers you) or `{label, url}` (it opens the link).
 Examples:
 
 ```sheldon
-{"type": "mail", "from": "Sam Tremblay <sam.tremblay@exemple.com>", "to": "Alex Dubois <alex.dubois@exemple.com>", "subject": "Enregistrement de mardi", "date": "2026-09-29T18:42", "body": "Salut Alex,\n\nC’est bon pour mardi 14 h au studio. J’apporte les deux micros et le plan de l’épisode 44.\n\nÀ mardi,\nSam", "attachments": [{"name": "plan-episode-44.pdf", "detail": "2 pages · 184 ko"}], "action": "Répondre"}
+{"type": "mail", "from": "Sam Tremblay <sam.tremblay@example.com>", "to": "Alex Dubois <alex.dubois@example.com>", "subject": "Enregistrement de mardi", "date": "2026-09-29T18:42", "body": "Salut Alex,\n\nC’est bon pour mardi 14 h au studio. J’apporte les deux micros et le plan de l’épisode 44.\n\nÀ mardi,\nSam", "attachments": [{"name": "plan-episode-44.pdf", "detail": "2 pages · 184 ko"}], "action": "Répondre"}
 ```
 
 ```sheldon
@@ -47,7 +47,7 @@ brouillon").
 Examples:
 
 ```sheldon
-{"type": "draft", "channel": "mail", "from": "Alex Dubois <alex.dubois@exemple.com>", "to": "Camille Roy <camille.roy@exemple.com>", "subject": "Re : maquette de jeudi", "date": "2026-10-02T07:12", "body": "Bonjour Camille,\n\nOui pour jeudi, c’est parfait. Je t’envoie la maquette ce soir, avec les deux pistes de couleurs.\n\nBonne journée,\nAlex", "action": "Envoyer", "secondary": "Garder en brouillon"}
+{"type": "draft", "channel": "mail", "from": "Alex Dubois <alex.dubois@example.com>", "to": "Camille Roy <camille.roy@example.com>", "subject": "Re : maquette de jeudi", "date": "2026-10-02T07:12", "body": "Bonjour Camille,\n\nOui pour jeudi, c’est parfait. Je t’envoie la maquette ce soir, avec les deux pistes de couleurs.\n\nBonne journée,\nAlex", "action": "Envoyer", "secondary": "Garder en brouillon"}
 ```
 
 ```sheldon
@@ -122,7 +122,7 @@ and `mailto:` (one address). They open the phone, messages or mail app with noth
 Examples:
 
 ```sheldon
-{"type": "contact", "name": "Sam Tremblay", "role": "Ingénieur du son", "company": "Studio Nord", "phone": "+1-514-555-0199", "email": "sam.tremblay@exemple.com", "address": "4521, boulevard Saint-Laurent, Montréal", "note": "Il a mixé les épisodes 38 à 42.", "last": "dernier échange le 29 sept.", "action": {"label": "Appeler", "url": "tel:+15145550199"}, "secondary": "Demander un devis"}
+{"type": "contact", "name": "Sam Tremblay", "role": "Ingénieur du son", "company": "Studio Nord", "phone": "+1-514-555-0199", "email": "sam.tremblay@example.com", "address": "4521, boulevard Saint-Laurent, Montréal", "note": "Il a mixé les épisodes 38 à 42.", "last": "dernier échange le 29 sept.", "action": {"label": "Appeler", "url": "tel:+15145550199"}, "secondary": "Demander un devis"}
 ```
 
 ```sheldon

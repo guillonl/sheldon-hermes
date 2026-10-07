@@ -51,10 +51,12 @@ from cryptography.hazmat.primitives.asymmetric import ec
 if TYPE_CHECKING:  # Import différé à l'exécution (core.live importe ce module) : voir live_changed.
     from .live import LiveSend, SenderOf, ShownChange
 
-from .media import block_summary, plain_preview
+from .calls import in_quiet_hours
+from .media import block_summary, masked_preview
 from .paths import ensure_private_dir
 from .requests import Request
 from .store import DeviceStore, LiveTarget, PushTarget
+from .text import mask_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -552,7 +554,9 @@ def _opaque(value: str, push_key: bytes) -> str:
 def request_payload(request: Request, sender: str, preview: bool, badge: int, *, push_key: bytes) -> Dict[str, Any]:
     data = request.to_json()
     aps: Dict[str, Any] = {
-        "alert": _alert(sender, plain_preview(request.title), preview, "REQUEST"),
+        # Spec 6.5 : ni code, ni IBAN, ni carte sur l'écran verrouillé ; l'app garde le titre entier.
+        # Masqué avant d'être borné (revue finale 47, M6) : un titre fait jusqu'à 200 caractères.
+        "alert": _alert(sender, masked_preview(request.title), preview, "REQUEST"),
         "sound": "default",
         "category": "sheldon.request",
         # Toutes les demandes ensemble sur l'écran verrouillé.
@@ -565,14 +569,14 @@ def request_payload(request: Request, sender: str, preview: bool, badge: int, *,
     }
     if preview and request.category and request.category.strip().casefold() != sender.strip().casefold():
         # Pas de sous-titre qui redit le titre (une demande de l'agent « Calendrier » classée « Calendrier »).
-        aps["alert"]["subtitle"] = request.category
+        aps["alert"]["subtitle"] = mask_secrets(request.category)
     info: Dict[str, Any] = {
         "type": "request", "requestId": request.id,
         "conversationId": request.conversation_id if preview else _opaque(request.conversation_id, push_key),
         "kind": request.kind, "allowsText": request.allows_text, "expiresAt": data["expiresAt"],
     }
     if preview:
-        info["choices"] = data["choices"][:MAX_CHOICES_IN_PUSH]
+        info["choices"] = [_masked_label(choice) for choice in data["choices"][:MAX_CHOICES_IN_PUSH]]
         # Le bouton « Autoriser » direct de l'app n'apparaît que si elle peut montrer la
         # commande entière et fidèle : jamais coupée ni retouchée, telle qu'Hermes l'a
         # envoyée (déjà masquée, request.command). Sans aperçu, jamais de command
@@ -580,6 +584,23 @@ def request_payload(request: Request, sender: str, preview: bool, badge: int, *,
         if request.kind == "approval" and request.command and len(request.command) <= MAX_COMMAND_LENGTH:
             info["command"] = request.command
     return {"aps": aps, "sheldon": info}
+
+
+def _masked_label(choice: Dict[str, Any]) -> Dict[str, Any]:
+    """Un choix dont le libellé part chez Apple (boutons de la notification, bouton principal de
+    l'Activité en direct) : masqué comme le titre (spec 6.5, revue finale 47, M7). L'app garde le
+    libellé entier, par /v1/requests."""
+    label = choice.get("label")
+    return {**choice, "label": mask_secrets(label)} if isinstance(label, str) else dict(choice)
+
+
+def _quieted(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Spec 9 : la même charge, sans son, dans le centre de notifications (`passive`). Une copie :
+    la charge partagée par les autres appareils ne change jamais."""
+    quiet = copy.deepcopy(payload)
+    quiet["aps"]["interruption-level"] = "passive"
+    quiet["aps"].pop("sound", None)
+    return quiet
 
 
 def closed_payload(request_id: str) -> Dict[str, Any]:
@@ -602,7 +623,8 @@ def reply_payload(
     thread = conversation_id if preview else _opaque(conversation_id, push_key)
     # Une réponse sans phrase lit le `summary` de son bloc, seulement avec aperçu : sans aperçu,
     # rien de lisible ne passe chez Apple (décision A54).
-    body = plain_preview(text) or (block_summary(text) if preview else "")
+    # Le corps et le `summary` sont masqués (masked_preview, spec 6.5) : l'app garde le texte entier.
+    body = masked_preview(text) or (block_summary(text) if preview else "")
     if preview:
         alert: Dict[str, Any] = {"title": sender}
         if body:
@@ -631,9 +653,10 @@ def reply_payload(
 
 def task_payload(item: Dict[str, Any], preview: bool, *, push_key: bytes) -> Dict[str, Any]:
     conversation_id = item["conversationId"]
+    title = mask_secrets(item["title"])
     return {
         "aps": {
-            "alert": _alert(item["title"], item["summary"] or item["title"], preview, "TASK"),
+            "alert": _alert(title, mask_secrets(item["summary"]) if item["summary"] else title, preview, "TASK"),
             "sound": "default", "category": "sheldon.task", "thread-id": "feed", "mutable-content": 1,
         },
         "sheldon": {
@@ -658,11 +681,12 @@ def device_payload(device_id: str, name: str, preview: bool) -> Dict[str, Any]:
 def _call_info(call: Dict[str, Any], preview: bool, push_key: bytes) -> Dict[str, Any]:
     # Pour l'affichage seulement, requested : l'extension est la seule à appliquer les garde-fous
     # (core/calls.py). Sans aperçu (décision A54) : ni nom d'agent, ni identifiant lisible, leurs
-    # empreintes HMAC par pushKey, comme pour les autres pushes.
+    # empreintes HMAC par pushKey, comme pour les autres pushes. Avec aperçu, la raison est masquée
+    # (spec 6.5) : l'écran d'appel la montre telle qu'Apple l'a reçue.
     if preview:
         return {
             "type": "call", "callId": call["callId"], "agentId": call["agentId"], "agentName": call["agentName"],
-            "conversationId": call["conversationId"], "reason": plain_preview(call["reason"]), "requested": call["requested"],
+            "conversationId": call["conversationId"], "reason": masked_preview(call["reason"]), "requested": call["requested"],
         }
     return {
         "type": "call", "callId": call["callId"], "agentId": _opaque(call["agentId"], push_key),
@@ -679,7 +703,7 @@ def call_alert_payload(call: Dict[str, Any], preview: bool, *, push_key: bytes) 
     """L'appel sur un appareil qui ne sonne pas (Mac, iPhone sans jeton PushKit) : « Hermes veut te parler »."""
     if preview:
         alert: Dict[str, Any] = {
-            "title-loc-key": "PUSH_CALL_TITLE", "title-loc-args": [call["agentName"]], "body": plain_preview(call["reason"]),
+            "title-loc-key": "PUSH_CALL_TITLE", "title-loc-args": [call["agentName"]], "body": masked_preview(call["reason"]),
         }
     else:
         alert = {"title-loc-key": "PUSH_CALL_TITLE_ANON", "loc-key": "PUSH_CALL_BODY_ANON"}
@@ -720,9 +744,9 @@ def live_state(
     return {
         "requestId": request.id,
         "sender": sender if preview else None,
-        "title": request.title if preview else None,
-        "category": category if preview else None,
-        "primary": primary if preview else None,
+        "title": mask_secrets(request.title) if preview else None,
+        "category": mask_secrets(category) if preview and category else None,
+        "primary": _masked_label(primary) if preview and primary is not None else None,
         "others": others,
         "expiresAt": request.expires_at,
         "status": final_status,
@@ -748,7 +772,7 @@ def live_start_payload(request: Request, sender: str, others: int, preview: bool
             "attributes-type": LIVE_ATTRIBUTES_TYPE,
             "attributes": {"startRequestId": request.id, "isDemo": False},
             "input-push-token": 1,
-            "alert": _live_alert(sender, request.title, preview),
+            "alert": _live_alert(sender, mask_secrets(request.title), preview),
         },
     }
     if request.expires_at is not None:
@@ -820,7 +844,13 @@ class PushService:
                 # Sans échéance (une proposition sans délai), aucun en-tête : Apple stocke
                 # tant que l'appareil est hors ligne plutôt que de perdre la notification.
                 expiration = int(request.expires_at) if request.expires_at is not None else None
-                self._send_all(lambda target: Push(target.token, target.environment, payload, "alert", request.id, expiration))
+                # Spec 9 : une proposition qui peut attendre arrive sans son pendant les heures calmes
+                # de l'appareil ; une demande bloquante ou une décision importante garde le sien.
+                can_wait = request.origin == "proposal" and not request.important
+                self._send_all(lambda target: Push(
+                    target.token, target.environment, self._quiet_for(target, payload) if can_wait else payload,
+                    "alert", request.id, expiration,
+                ))
         else:
             self._send_all(lambda target: Push(target.token, target.environment, closed_payload(request.id), "background"))
 
@@ -830,7 +860,15 @@ class PushService:
 
     def task(self, item: Dict[str, Any]) -> None:
         payload = task_payload(item, self._preview, push_key=self._store.push_key())
-        self._send_all(lambda target: Push(target.token, target.environment, payload, "alert", item["id"]))
+        # Spec 9 : une carte du Fil peut attendre.
+        self._send_all(lambda target: Push(target.token, target.environment, self._quiet_for(target, payload), "alert", item["id"]))
+
+    def _quiet_for(self, target: PushTarget, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Sans son pendant les heures calmes que l'utilisateur a réglées sur cet appareil ; sinon,
+        la charge telle quelle."""
+        if target.quiet_hours is not None and in_quiet_hours(target.quiet_hours, self._clock()):
+            return _quieted(payload)
+        return payload
 
     def device_paired(self, device_id: str, name: str) -> None:
         """Aux appareils déjà reliés seulement : le nouveau sait qu'il vient de se relier."""

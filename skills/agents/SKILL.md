@@ -63,13 +63,12 @@ If the tool refuses, tell the user why in one sentence.
 
 The new agent appears in Sheldon's list by itself, in less than a minute, on the iPhone and on the
 Mac. Tell the user so. Several agents show in Sheldon only when the default profile's gateway serves
-them all: `gateway.multiplex_profiles: true`, with the Sheldon plugin enabled on the default profile
-only. If the user has not set it, say so in one sentence.
+them all, with the Sheldon plugin enabled on the default profile only. Secondary agents need Hermes 0.21.1 or newer,
+where the default profile's gateway serves every profile; on 0.20.4 Sheldon only sees the main agent, even with `gateway.multiplex_profiles: true`.
+If the new agent does not appear within a minute, the user restarts the gateway.
 
 ## Limits
 
-- When `gateway.multiplex_profiles` is off, the new agent will not appear: the user turns it on with
-  `hermes config set gateway.multiplex_profiles true` then `hermes gateway restart`.
 - If the user says the new agent's chat does not answer, they restart the gateway with
   `hermes gateway restart` on Hermes's computer. Never run it yourself: it would stop the gateway that
   runs this conversation.

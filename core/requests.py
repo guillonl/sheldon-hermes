@@ -104,6 +104,8 @@ class Request:
     # La provenance (le mail, le message, l'invitation d'où vient la demande), nettoyée par
     # source.clean_source : l'app la montre en une ligne et ouvre le message d'origine entier.
     source: Optional[Dict[str, Any]] = None
+    # Le projet d'Hermes de son dossier (spec 12, core/projects.project_json), ou None.
+    project: Optional[Dict[str, Optional[str]]] = None
 
     @property
     def blocking(self) -> bool:
@@ -131,6 +133,7 @@ class Request:
             "expiredReason": self.expired_reason if self.status == "expired" else None,
             "important": self.important,
             "source": dict(self.source) if self.source else None,
+            "project": dict(self.project) if self.project else None,
             "createdAt": iso_utc(self.created_at),
             "expiresAt": iso_utc(self.expires_at) if self.expires_at is not None else None,
         }
@@ -139,7 +142,7 @@ class Request:
 _COLUMNS = (
     "seq, id, kind, origin, conversation_id, agent_id, title, body, category, choices, allows_text, "
     "status, answer, hermes_ref, session_key, chat_id, created_at, expires_at, closed_at, claimed_at, "
-    "command, expired_reason, important, source"
+    "command, expired_reason, important, source, project"
 )
 
 
@@ -155,6 +158,7 @@ def _request(row: Optional[sqlite3.Row]) -> Optional[Request]:
         expires_at=row["expires_at"], closed_at=row["closed_at"], claimed_at=row["claimed_at"], seq=row["seq"],
         command=row["command"], expired_reason=row["expired_reason"], important=bool(row["important"]),
         source=json.loads(row["source"]) if row["source"] else None,
+        project=json.loads(row["project"]) if row["project"] else None,
     )
 
 
@@ -211,7 +215,8 @@ CREATE TABLE IF NOT EXISTS requests (
     command TEXT,
     expired_reason TEXT,
     important INTEGER NOT NULL DEFAULT 0,
-    source TEXT
+    source TEXT,
+    project TEXT
 );
 CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
 """
@@ -220,7 +225,7 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
         super().__init__(path, clock)
         # Une base de l'étape précédente a déjà sa table requests, sans cette colonne : le
         # CREATE TABLE IF NOT EXISTS de SCHEMA ne la touche pas (E1, activité en direct).
-        ensure_columns(self._conn, "requests", {"important": "INTEGER NOT NULL DEFAULT 0", "source": "TEXT"})
+        ensure_columns(self._conn, "requests", {"important": "INTEGER NOT NULL DEFAULT 0", "source": "TEXT", "project": "TEXT"})
 
     def insert(self, **values: Any) -> Request:
         request_id = f"r-{uuid.uuid4().hex}"
@@ -241,8 +246,8 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
             self._conn.execute(
                 "INSERT INTO requests (id, kind, origin, conversation_id, agent_id, title, body, category, "
                 "choices, allows_text, status, hermes_ref, session_key, chat_id, created_at, expires_at, command, "
-                "important, source) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)",
+                "important, source, project) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     request_id, values["kind"], values["origin"], values["conversation_id"], values["agent_id"],
                     values["title"], values.get("body"), values.get("category"),
@@ -250,6 +255,7 @@ CREATE INDEX IF NOT EXISTS requests_status ON requests(status, seq);
                     values.get("hermes_ref"), values.get("session_key"), values.get("chat_id"), now, expires_at,
                     values.get("command"), int(important),
                     json.dumps(values["source"], ensure_ascii=False) if values.get("source") else None,
+                    json.dumps(values["project"], ensure_ascii=False) if values.get("project") else None,
                 ),
             )
         request = self.get(request_id)
@@ -460,6 +466,7 @@ class RequestService:
         session_key: str,
         chat_id: str,
         timeout: Optional[float],
+        project: Optional[Dict[str, Optional[str]]] = None,
     ) -> Request:
         labels = [_clean_clarify_text(choice, MAX_CLARIFY_LABEL_LENGTH) for choice in (choices or [])]
         labels = [label for label in labels if label]
@@ -469,6 +476,7 @@ class RequestService:
             choices=[{"id": f"c{i}", "label": label, "style": "primary" if i == 0 else "secondary"} for i, label in enumerate(labels)],
             # Le bouton « Autre » d'Hermes : une réponse libre est toujours permise.
             allows_text=True, hermes_ref=clarify_id, session_key=session_key, chat_id=chat_id, timeout=timeout,
+            project=project,
         )
         self._publish(request, True)
         return request
@@ -486,6 +494,7 @@ class RequestService:
         session_key: str,
         chat_id: str,
         timeout: Optional[float],
+        project: Optional[Dict[str, Optional[str]]] = None,
     ) -> Request:
         allowed = {"once", "deny"} | ({"session"} if allow_session else set()) | ({"always"} if allow_permanent else set())
         fence = _code_fence(command)
@@ -498,7 +507,7 @@ class RequestService:
             title=title, body=f"{fence}\n{command}\n{fence}", category=None,
             choices=[{"id": i, "label": label, "style": style} for i, label, style in APPROVAL_CHOICES if i in allowed],
             allows_text=False, hermes_ref=hermes_request_id, session_key=session_key, chat_id=chat_id, timeout=timeout,
-            command=command,
+            command=command, project=project,
         )
         self._publish(request, True)
         return request

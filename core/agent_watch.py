@@ -24,12 +24,15 @@ class AgentWatch:
         outbox: Outbox,
         clock: Callable[[], float] = time.time,
         every: float = WATCH_EVERY,
+        on_look: Callable[[List[Agent]], Any] = lambda _agents: None,
     ) -> None:
+        # on_look : reçoit la liste à chaque relecture, même inchangée (la garde des autres profils).
         self._agents = agents
         self._conversation_id = conversation_id
         self._outbox = outbox
         self._clock = clock
         self._every = every
+        self._on_look = on_look
         self._last_look: Optional[float] = None
         # Ce que l'app connaît déjà : la forme de GET /v1/agents, par id d'agent.
         self._known: Optional[Dict[str, Dict[str, Any]]] = None
@@ -40,7 +43,9 @@ class AgentWatch:
         if self._last_look is not None and now - self._last_look < self._every:
             return 0
         self._last_look = now
-        current = {agent.id: agent.to_json(self._conversation_id(agent)) for agent in self._agents()}
+        agents = self._agents()
+        self._on_look(agents)
+        current = {agent.id: agent.to_json(self._conversation_id(agent)) for agent in agents}
         if self._known is None:
             # Premier tour : l'app lit la liste à sa connexion (GET /v1/agents), rien à annoncer.
             self._known = current

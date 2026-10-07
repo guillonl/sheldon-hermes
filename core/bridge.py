@@ -45,6 +45,8 @@ class _OpenMessage:
     attachments: List[Dict[str, Any]] = field(default_factory=list)
     # Le message de l'app qui a ouvert le tour où Hermes l'écrit (replyTo), s'il est connu.
     reply_to: Optional[str] = None
+    # "learning" : une ligne de la revue d'Hermes (spec 10, A8), jamais la réponse du tour.
+    kind: Optional[str] = None
 
 
 class SheldonBridge:
@@ -137,13 +139,17 @@ class SheldonBridge:
         conversation_id: str = MAIN_CONVERSATION,
         attachments: Optional[List[Dict[str, Any]]] = None,
         reply_to: Optional[str] = None,
+        kind: Optional[str] = None,
     ) -> str:
+        """kind : "learning" pour une ligne de la revue d'Hermes (spec 10, A8) ; elle est publiée
+        avec `kind` et ne devient jamais la réponse que notifie la fin du tour."""
         message_id = f"a-{uuid.uuid4().hex}"
         # Hors d'un tour de cette conversation (par exemple le message d'erreur qu'Hermes envoie
         # après on_processing_complete, ou une tâche planifiée), aucun turn.finished ne viendra
         # le clore : il part final.
         final = conversation_id not in self._open_turns
         self._remember(message_id, conversation_id, reply_to)
+        self._open[message_id].kind = kind
         self._publish_assistant(message_id, text, final=final, attachments=attachments)
         return message_id
 
@@ -234,6 +240,8 @@ class SheldonBridge:
             message["attachments"] = list(entry.attachments)
         if entry.reply_to:
             message["replyTo"] = entry.reply_to
+        if entry.kind:
+            message["kind"] = entry.kind
         return message
 
     def _publish_assistant(
@@ -244,7 +252,7 @@ class SheldonBridge:
         if attachments is not None:
             entry.attachments = list(attachments)
         self._publish_message(entry.conversation_id, self._message(message_id, entry), final=final)
-        if entry.conversation_id in self._open_turns and (entry.text.strip() or entry.attachments):
+        if entry.conversation_id in self._open_turns and entry.kind is None and (entry.text.strip() or entry.attachments):
             # Sans texte, une pièce jointe seule (une image envoyée sans légende) reste une
             # vraie réponse : son nom sert de repli pour la notification de fin de tour.
             file_name = entry.attachments[0].get("name") if entry.attachments else None

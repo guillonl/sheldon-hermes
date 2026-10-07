@@ -2,7 +2,7 @@
 
 # Web and search
 
-Load this sheet before your first link, results or digest block in a conversation; each block gives its fields (required ones in bold, other accepted names in parentheses), its preview, its full view on a tap, its buttons and two examples, French then English.
+Load this sheet before your first link, results, digest or quote block in a conversation; each block gives its fields (required ones in bold, other accepted names in parentheses), its preview, its full view on a tap, its buttons and two examples, French then English.
 
 ### `link`
 
@@ -22,7 +22,7 @@ Buttons: none; "Ouvrir la page" only opens the link, it sends nothing.
 Examples:
 
 ```sheldon
-{"type": "link", "url": "https://exemple.com/liquid-glass-un-an-apres", "title": "Liquid Glass, un an après", "site": "exemple.com", "summary": "Ce qui a tenu (les barres flottantes, les boutons ronds) et ce que les équipes ont retiré (le flou derrière le texte long).", "points": ["Les barres flottantes sont restées partout", "Le flou derrière le texte long a disparu", "Le contraste a gagné deux crans"], "date": "2026-10-01", "readingTime": "6 min"}
+{"type": "link", "url": "https://example.com/liquid-glass-un-an-apres", "title": "Liquid Glass, un an après", "site": "example.com", "summary": "Ce qui a tenu (les barres flottantes, les boutons ronds) et ce que les équipes ont retiré (le flou derrière le texte long).", "points": ["Les barres flottantes sont restées partout", "Le flou derrière le texte long a disparu", "Le contraste a gagné deux crans"], "date": "2026-10-01", "readingTime": "6 min"}
 ```
 
 ```sheldon
@@ -50,7 +50,7 @@ page, it sends nothing.
 Examples:
 
 ```sheldon
-{"type": "digest", "title": "Veille design", "subtitle": "Ce matin · 42 articles lus", "dropped": 37, "feedback": true, "items": [{"title": "Liquid Glass, un an après", "site": "exemple.com", "why": "Tu suis Liquid Glass depuis sa sortie.", "url": "https://exemple.com/liquid-glass"}, {"title": "Figma Motion, premier essai", "site": "exemple.com", "why": "Tu en parlais hier avec Camille Roy.", "url": "https://exemple.com/figma-motion"}, {"title": "Des graphiques que VoiceOver lit", "site": "exemple.com", "why": "Pour les blocs de chiffres de ton portfolio.", "url": "https://exemple.com/graphiques"}, {"title": "Designer pour les agents", "site": "exemple.com", "why": "Ton sujet du mois.", "url": "https://exemple.com/agents"}, {"title": "La typographie variable", "site": "exemple.com", "why": "Sam Tremblay te l’a conseillée.", "url": "https://exemple.com/typographie"}]}
+{"type": "digest", "title": "Veille design", "subtitle": "Ce matin · 42 articles lus", "dropped": 37, "feedback": true, "items": [{"title": "Liquid Glass, un an après", "site": "example.com", "why": "Tu suis Liquid Glass depuis sa sortie.", "url": "https://example.com/liquid-glass"}, {"title": "Figma Motion, premier essai", "site": "example.com", "why": "Tu en parlais hier avec Camille Roy.", "url": "https://example.com/figma-motion"}, {"title": "Des graphiques que VoiceOver lit", "site": "example.com", "why": "Pour les blocs de chiffres de ton portfolio.", "url": "https://example.com/graphiques"}, {"title": "Designer pour les agents", "site": "example.com", "why": "Ton sujet du mois.", "url": "https://example.com/agents"}, {"title": "La typographie variable", "site": "example.com", "why": "Sam Tremblay te l’a conseillée.", "url": "https://example.com/typographie"}]}
 ```
 
 ```sheldon
@@ -74,9 +74,34 @@ Buttons: none; "Ouvrir" only opens the page, it sends nothing.
 Examples:
 
 ```sheldon
-{"type": "results", "query": "devis studio", "scope": "Mail", "total": "12 résultats", "items": [{"title": "Devis pour les épisodes 43 à 46", "site": "Camille Roy", "snippet": "Voici le devis pour les quatre prochains enregistrements, au même tarif.", "date": "2026-10-01T09:12"}, {"title": "Re : devis du studio", "site": "Sam Tremblay", "snippet": "Je valide de mon côté, on peut signer.", "date": "2026-10-01T11:40"}, {"title": "Tarifs 2026 du studio", "site": "exemple.com", "url": "https://exemple.com/studio/tarifs", "snippet": "Les nouveaux tarifs à partir de janvier."}]}
+{"type": "results", "query": "devis studio", "scope": "Mail", "total": "12 résultats", "items": [{"title": "Devis pour les épisodes 43 à 46", "site": "Camille Roy", "snippet": "Voici le devis pour les quatre prochains enregistrements, au même tarif.", "date": "2026-10-01T09:12"}, {"title": "Re : devis du studio", "site": "Sam Tremblay", "snippet": "Je valide de mon côté, on peut signer.", "date": "2026-10-01T11:40"}, {"title": "Tarifs 2026 du studio", "site": "example.com", "url": "https://example.com/studio/tarifs", "snippet": "Les nouveaux tarifs à partir de janvier."}]}
 ```
 
 ```sheldon
 {"type": "results", "query": "studio quote", "scope": "Mail", "total": "12 results", "items": [{"title": "Quote for episodes 43 to 46", "site": "Camille Roy", "snippet": "Here is the quote for the next four recordings, at the same rate.", "date": "2026-10-01T09:12"}, {"title": "Re: studio quote", "site": "Sam Tremblay", "snippet": "Fine by me, we can sign.", "date": "2026-10-01T11:40"}, {"title": "Studio rates 2026", "site": "example.com", "url": "https://example.com/studio/rates", "snippet": "The new rates from January."}]}
+```
+
+### `quote`
+
+A quoted passage: a sentence from an article, an interview, a book or a mail, word for word, with who
+said it and where. Goes well with the `grounded-citations` skill.
+
+Fields: **`text`** (the passage, word for word), `author`, `cite` (`{title, url, date}`, or a title;
+`url` https or http only; without a title, the site of the link), `highlight` (the part that matters,
+copied exactly from `text`: Sheldon draws it in ink and the rest in gray; a `highlight` that is not in
+`text` is ignored).
+
+Preview: three lines of the passage behind a thin rule, then the author and the title of the source.
+Full view: the whole passage, the date, and "Ouvrir la source".
+
+Buttons: none; "Ouvrir la source" only opens the page, it sends nothing.
+
+Examples:
+
+```sheldon
+{"type": "quote", "text": "Le design, ce n’est pas seulement ce à quoi ça ressemble. Le design, c’est comment ça marche, et pour qui.", "author": "Camille Roy", "highlight": "comment ça marche", "cite": {"title": "Les Bavards, épisode 42", "url": "https://example.com/entretien-camille-roy", "date": "2 oct."}}
+```
+
+```sheldon
+{"type": "quote", "text": "Design is not just what it looks like. Design is how it works, and for whom.", "author": "Camille Roy", "highlight": "how it works", "cite": {"title": "Les Bavards, episode 42", "url": "https://example.com/interview-camille-roy", "date": "Oct 2"}}
 ```

@@ -13,6 +13,8 @@ import os
 import re
 from typing import List, Tuple
 
+from .text import mask_secrets
+
 DIRECTIVES = ("[[audio_as_voice]]", "[[as_document]]")
 _MEDIA_LINE = re.compile(
     r"""^[ \t]*[`"'*_]{0,3}MEDIA:[ \t]*(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|[^\s`"'*]+)[`"'*_]{0,3}[ \t]*$""",
@@ -77,15 +79,26 @@ def plain_preview(text: str, limit: int = 180) -> str:
     return _cap(" ".join(_plain_lines(text)), limit)
 
 
+def masked_preview(text: str, limit: int = 180) -> str:
+    """plain_preview pour l'écran verrouillé (spec 6.5, élargi aux réponses) : masqué avant d'être
+    mis en une ligne et borné (coupé à la borne, un numéro ne passerait plus son contrôle et
+    garderait ses premiers chiffres), puis encore après, pour un numéro que la mise en une ligne a
+    recollé."""
+    return mask_secrets(plain_preview(mask_secrets(text), limit))
+
+
 _BLOCK_FENCES = ("sheldon", "sheldon-block")
 
 
 def block_summary(text: str) -> str:
     """Le `summary` du premier bloc ```sheldon qui en a un (un objet, ou un tableau d'objets), en
-    texte simple : le corps d'une notification pour une réponse sans phrase (spec 7.2). "" sinon,
-    sans jamais lever : un JSON illisible ne coûte que le résumé."""
+    texte simple et masqué (masked_preview) : le corps d'une notification pour une réponse sans
+    phrase (spec 7.2). Un bloc remplacé par un bloc plus récent de même `id` dans ce message (V2,
+    `BlockUpdates` côté app) ne parle plus : c'est le plus récent qui le fait. "" sinon, sans jamais
+    lever : un JSON illisible ne coûte que le résumé."""
     fence = None
     body: List[str] = []
+    items: List[dict] = []
     for raw in text.splitlines():
         if not _FENCE.match(raw):
             if fence is not None:
@@ -97,23 +110,33 @@ def block_summary(text: str) -> str:
             body = []
             continue
         if fence in _BLOCK_FENCES:
-            summary = _first_summary("\n".join(body))
-            if summary:
-                return summary
+            items.extend(_block_items("\n".join(body)))
         fence = None
+    for position, item in enumerate(items):
+        block_id = item.get("id")
+        if isinstance(block_id, str) and any(later.get("id") == block_id for later in items[position + 1:]):
+            continue
+        summary = item.get("summary")
+        if isinstance(summary, str) and masked_preview(summary):
+            return masked_preview(summary)
     return ""
 
 
-def _first_summary(body: str) -> str:
+def _block_items(body: str) -> List[dict]:
+    """Les blocs d'une clôture dont le résumé se lit : jamais un `link`, dont le `summary` est le
+    résumé de sa page, un champ du bloc que l'app ne lit pas comme celui de l'enveloppe
+    (BlockAnnotations, readsSummary) ; la notification non plus. Un `link` garde pourtant son `id`
+    pour qu'il puisse remplacer un bloc plus ancien, sans résumé."""
     try:
         value = json.loads(body)
     except (ValueError, RecursionError):
-        return ""
+        return []
+    items = []
     for item in value if isinstance(value, list) else [value]:
-        summary = item.get("summary") if isinstance(item, dict) else None
-        if isinstance(summary, str) and plain_preview(summary):
-            return plain_preview(summary)
-    return ""
+        if not isinstance(item, dict):
+            continue
+        items.append({"id": item.get("id")} if item.get("type") == "link" else item)
+    return items
 
 
 def first_line(text: str, limit: int = 120) -> str:

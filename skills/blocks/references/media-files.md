@@ -2,7 +2,7 @@
 
 # Media and files
 
-Load this sheet before your first file or image block in a conversation; each block gives its fields (required ones in bold, other accepted names in parentheses), its preview, its full view on a tap, its buttons and two examples, French then English.
+Load this sheet before your first file, image or media block in a conversation; each block gives its fields (required ones in bold, other accepted names in parentheses), its preview, its full view on a tap, its buttons and two examples, French then English.
 
 ### `file`
 
@@ -47,9 +47,36 @@ Buttons: two at most, `action` and `secondary`. Each answers you as `label · ca
 Examples:
 
 ```sheldon
-{"type": "image", "file": "5ce7a1b2c3d4e5f60718293a4b5c6d7e", "alt": "Capture de la page de paiement du fournisseur : le formulaire est rempli, le bouton Payer est grisé.", "caption": "Le bouton Payer reste grisé, même avec la carte enregistrée.", "action": "Réessayer", "secondary": "Laisser", "source": {"kind": "web", "url": "https://exemple.com/paiement"}}
+{"type": "image", "file": "5ce7a1b2c3d4e5f60718293a4b5c6d7e", "alt": "Capture de la page de paiement du fournisseur : le formulaire est rempli, le bouton Payer est grisé.", "caption": "Le bouton Payer reste grisé, même avec la carte enregistrée.", "action": "Réessayer", "secondary": "Laisser", "source": {"kind": "web", "url": "https://example.com/paiement"}}
 ```
 
 ```sheldon
 {"type": "image", "files": ["0a1b2c3d4e5f60718293a4b5c6d7e8f9", "1b2c3d4e5f60718293a4b5c6d7e8f90a", "2c3d4e5f60718293a4b5c6d7e8f90a1b"], "alt": "Three logo directions for Sam Tremblay’s studio: a monogram, a wordmark and a badge.", "caption": "Three directions, same palette.", "action": "Keep the second"}
+```
+
+### `media`
+
+A song, a podcast episode or a video. Sheldon reads only a file you attached, by its id: its play
+button opens it in Créations, where a sound plays when the user taps it and a video goes to another
+app through "Partager". Nothing plays on its own. A `url` (https or http) only opens the page outside
+Sheldon, never inside it.
+
+Fields: **`title`**, `artist` (or `show` for an episode), `kind` (`song`, `episode`, `video`),
+`duration` ("42:10", or a number of seconds), `position` (where the user stopped, "12:30"), `file`
+(the id of a file you attached), `url` (the page of the song or the episode), `action`.
+
+Preview: the title, the artist and the duration, with the play button when there is a `file`.
+Full view: the kind, the duration, the position, and "Ouvrir" for a `url`.
+
+Buttons: one, `action`. A label answers you as `label · title` ("Écouter plus tard · Épisode 43");
+`{label, url}` only opens the link.
+
+Examples:
+
+```sheldon
+{"type": "media", "title": "Épisode 43 : prototyper avec l’IA", "show": "Les Bavards", "kind": "episode", "duration": "42:10", "position": "12:30", "url": "https://example.com/les-bavards/43", "action": "Écouter plus tard"}
+```
+
+```sheldon
+{"type": "media", "title": "Episode 43: prototyping with AI", "show": "Les Bavards", "kind": "episode", "duration": "42:10", "position": "12:30", "url": "https://example.com/les-bavards/43", "action": "Listen later"}
 ```

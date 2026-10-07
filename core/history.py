@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, ContextManager, Dict, Iterable, List, Optional, Tuple
 
 from . import media
+from .bots import peer_author
 from .conversations import Agent, Conversation
 from .timeutil import iso_utc
 
@@ -108,6 +109,30 @@ class SessionLocator:
         return []
 
 
+class LinkedSessions:
+    """Les sessions d'un chat d'agent branché sur la session « Bot Chat » de son bot (tâche 44) :
+    celle-ci, plus les sessions de Sheldon de ce chat dans la même base (ce qui s'est dit avant le
+    branchement). Sans lien : celles de SessionLocator, comme aujourd'hui."""
+
+    def __init__(self, locator: SessionLocator, linked: Callable[[], Optional[str]], bot_db: Optional[Path]) -> None:
+        self._locator = locator
+        self._linked = linked
+        self._bot_db = Path(bot_db).expanduser() if bot_db is not None else None
+        self.db: Optional[Path] = None
+
+    def session_ids(self) -> List[str]:
+        own = self._locator.session_ids()
+        session_id = self._linked()
+        if session_id is None or self._bot_db is None or not self._bot_db.exists():
+            self.db = self._locator.db
+            return own
+        if self._locator.db != self._bot_db:
+            # Les id de lignes ne se comparent pas d'une base à l'autre : « Bot Chat » seule.
+            own = []
+        self.db = self._bot_db
+        return [session_id] + [other for other in own if other != session_id]
+
+
 @dataclass(frozen=True)
 class HistoryPage:
     messages: List[Dict[str, Any]]
@@ -178,6 +203,11 @@ class HistoryReader:
         }
         if role == "user" and isinstance(platform_id, str) and platform_id.startswith("u-"):
             message["clientMessageId"] = platform_id[2:]
+        elif role == "user":
+            # Dans « Bot Chat », un message d'un autre bot (jamais un message tapé dans l'app).
+            peer = peer_author(text)
+            if peer is not None:
+                message["from"], message["text"] = peer
         if attachments:
             message["attachments"] = attachments
         return message

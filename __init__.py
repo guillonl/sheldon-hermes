@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 PLATFORM_NAME = "sheldon"
 HOME_CHANNEL_ENV = "SHELDON_HOME_CHANNEL"
@@ -154,11 +154,28 @@ def _tool_context() -> Any:
     return tool_context()
 
 
-def _propose(args: Any, **_kwargs: Any) -> str:
+def _propose(args: Any, task_id: str = "", **_kwargs: Any) -> str:
+    """task_id : passé par Hermes à chaque outil (tools/registry.py, dispatch) ; le dossier de sa
+    session donne le projet de la proposition (spec 12)."""
+    import dataclasses
+
     from .core import paths
     from .core.runtime import propose
 
-    return propose(args, _tool_context(), paths.db_path(), _port())
+    context = _tool_context()
+    folder = _workspace_root(task_id)
+    if folder:
+        context = dataclasses.replace(context, cwd=folder)
+    return propose(args, context, paths.db_path(), _port())
+
+
+def _workspace_root(task_id: str) -> Optional[str]:
+    """Le dossier de travail de la session d'Hermes, lu par l'adaptateur ; None s'il ne se charge pas."""
+    try:
+        from .adapter import workspace_root
+    except Exception:
+        return None
+    return workspace_root(task_id)
 
 
 def _chats(args: Any, **_kwargs: Any) -> str:
@@ -211,6 +228,18 @@ def _guard(tool_name: str = "", args: Any = None, task_id: str = "", **_kwargs: 
     """Le crochet pre_tool_call : guard_tool_call, avec le dossier de la session d'Hermes."""
     from .core.pair_link import guard_tool_call
     return guard_tool_call(tool_name, args, task_id, base_dir=_file_base_dir)
+
+
+def frozen_guard(places: Any) -> Callable[..., Any]:
+    """La garde posée par le gateway dans les autres profils servis (adapter.py, guard_profiles ;
+    revue finale 47, I3) : _guard, avec les lieux de Sheldon figés au démarrage, puisque le
+    HERMES_HOME d'un tour de ces profils est le leur (profiles/<nom>)."""
+
+    def guard(tool_name: str = "", args: Any = None, task_id: str = "", **_kwargs: Any) -> Any:
+        from .core.pair_link import guard_tool_call
+        return guard_tool_call(tool_name, args, task_id, base_dir=_file_base_dir, places=places)
+
+    return guard
 
 
 def _session_env(name: str) -> str:
